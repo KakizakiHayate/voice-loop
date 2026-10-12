@@ -1,0 +1,162 @@
+# voice-loop
+
+口と耳だけで、herdr の上の Claude Code と話すためのプラグインです。スマホやブラウザでタップして話し、もう一度タップして送ると、返事が声で返ってきます（トランシーバー式）。
+
+話し相手は2種類あります。
+
+- **個別のセッション**：herdr で動いている Claude Code のセッションをひとつ選んで話します。
+- **ハブ**：全セッションを見渡す役のセッションです。「全体どうなってる？」に答え、「〇〇に△△を頼んで」で指示を送り、頼んだ件が片づくと声で知らせます。
+
+## しくみ
+
+```
+ブラウザ（タップして話す）
+  → 聞き取り（whisper）        声を文字にする
+  → herdr → Claude Code         セッションに送り、返事を記録から読む
+  → 語り手（軽いモデル）        返事を話し言葉に直す
+  → 声（AivisSpeech）           読み上げる
+  → ブラウザで再生
+```
+
+本体（`server.py`）は launchd の常駐サービスとして動きます。プラグインは、その上げ下ろしと初回の準備を受け持つだけです。herdr を閉じても動き続け、Mac を再起動したあとは launchd が上げ直す作りです。
+
+## 準備
+
+macOS 専用です。次のものが要ります。足りないものは、あとで `doctor` が教えます。
+
+| 要るもの | 何に使うか |
+|---|---|
+| herdr 0.9.3 以上 | セッションの一覧・送信・画面の読み取り |
+| Claude Code と、herdr の Claude 連携 | 話し相手。連携が無いと返事を記録から読めません |
+| uv | 本体とハブの道具の実行 |
+| whisper のサーバー | 聞き取り |
+| AivisSpeech Engine | 声 |
+| Anthropic の API の認証 | 語り手（返事を話し言葉に直すモデル） |
+| Tailscale（任意） | スマホから使うとき |
+
+### herdr と Claude Code
+
+```sh
+herdr integration install claude
+```
+
+### 聞き取り（whisper）
+
+`127.0.0.1:8080` で、OpenAI 互換の `/v1/audio/transcriptions` に応えるサーバーを立てます。whisper.cpp の例です（モデルは約1.6GB）。
+
+```sh
+brew install whisper.cpp ffmpeg
+mkdir -p ~/.local/share/whisper-models ~/.local/state/whisper-work
+curl -L -o ~/.local/share/whisper-models/ggml-large-v3-turbo.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
+cd ~/.local/state/whisper-work && whisper-server \
+  -m ~/.local/share/whisper-models/ggml-large-v3-turbo.bin \
+  --host 127.0.0.1 --port 8080 --inference-path /v1/audio/transcriptions -l ja --convert
+```
+
+`--convert` は、ブラウザの録音を ffmpeg で変換するために要ります。変換は作業フォルダに一時ファイルを書くので、書き込めるフォルダで起動してください。launchd に登録して常駐させるときは、`WorkingDirectory` を忘れると変換に失敗します。
+
+### 声（AivisSpeech）
+
+`127.0.0.1:10101` で AivisSpeech Engine を動かします。Docker の例です（イメージは約3.7GB）。
+
+```sh
+docker run -d --name aivis --restart unless-stopped \
+  -p 127.0.0.1:10101:10101 ghcr.io/aivis-project/aivisspeech-engine:cpu-latest
+```
+
+### 語り手の認証
+
+語り手は Anthropic の API を呼びます。Claude のサブスクリプションとは別に、API の利用料がかかります（既定の Claude Haiku 4.5 で、200字ほどの返事1回あたり約0.3円。作者の環境での実測）。認証は次のどちらかです。
+
+- Anthropic の CLI でログインする：`brew install anthropics/tap/ant` のあと `ant auth login`
+- API キーを使う：設定フォルダの `config.env` に `ANTHROPIC_API_KEY=...` を書く
+
+## 入れ方
+
+```sh
+herdr plugin install u-space-inc/voice-loop
+herdr plugin action invoke u-space.voice-loop.start
+```
+
+手元に置いたフォルダから使うなら、`herdr plugin link <フォルダ>` で登録します。
+
+`start` は、設定フォルダにひな形を置き、常駐サービスを登録して上げ、ハブを立て、最後に点検の結果を出します。手でやることが残っていれば、番号つきで並びます。
+
+## 初回に、手で答えること
+
+ハブを初めて立てると、herdr の `hub` タブで Claude Code が「このフォルダを信頼しますか」と聞いて止まります。**↓ で「Yes, I trust this folder」を選び、Enter を押してください。** 初めの選択は「No, exit」なので、Enter だけでは進みません。
+
+この確認が出るのは、ハブの作業フォルダが次の設定を持っているためです。
+
+- `./hubctl`（ハブの道具）は、確認なしで実行できる
+- ファイルを書く道具（Edit / Write）は使えない
+- Bash で実行できるのは `./hubctl` だけ（それ以外は見張りが止める）
+
+答えたあと、もう一度 `start` を実行するか、画面の「ハブを起動」を押します。ログインなど、ほかの画面で止まっているときも同じで、端末で答えてから `start` です。voice-loop がこれらの画面に代わりに答えることはありません。
+
+ハブに新しいセッションを立てさせたとき、そのプロジェクトで Claude Code を初めて起動するなら、同じ確認がそのタブに出ます。これも手で答えます。
+
+## 使い方
+
+`start` が出す URL を開きます。スマホから使うなら、Tailscale で https にして開きます（スマホのマイクは https でないと使えません）。
+
+```sh
+tailscale serve --bg --https=8790 http://127.0.0.1:8790
+```
+
+話し相手を選び、「タップして話す」を押して話し、もう一度押して送ります。初めて開いたときの話し相手はハブです。準備が残っていると、画面にも同じ案内が出ます。
+
+## 命令
+
+どれも `herdr plugin action invoke u-space.voice-loop.<名前>` で呼びます。出力は `herdr plugin log list --plugin u-space.voice-loop` で読めます。
+
+| 名前 | すること |
+|---|---|
+| `start` | 初回の準備と起動。何度実行してもかまいません |
+| `stop` | 止める（Mac を再起動すると、また上がります） |
+| `restart` | 再起動。設定を変えたあとに |
+| `status` | サービス・ハブ・語り手の状態と URL |
+| `url` | 開く URL |
+| `doctor` | 点検。足りないものと、次にやること |
+| `uninstall` | 常駐の登録を外す（設定は残ります） |
+
+## 設定
+
+端末ごとのものは、本体の外の設定フォルダ（`~/.config/herdr/plugins/config/u-space.voice-loop/`）にあります。プラグインを入れ直しても消えません。
+
+| ファイル | 中身 |
+|---|---|
+| `config.env` | 設定。行頭の `#` を外すと有効になります。変えたら `restart` |
+| `readings.txt` | 読み上げで読み間違える語の読み替え（`語=よみ`）。変えたら `restart` |
+| `hub/CLAUDE.md` | ハブへの指示文。呼ばれたい名前やプロジェクトの呼び方を足せます。変えたらハブのタブを閉じて `start` |
+| `hub/speaking.md` | ハブの話し方の決まり（長さ、箇条書きにしない、など） |
+| `narrator_model` | 語り手のモデル名を1行。書くと再起動なしで切り替わり、消すと既定に戻ります |
+
+ハブに新しいセッションを立てさせるには、`config.env` の `VL_PROJECTS_DIR` にプロジェクトの置き場所を書きます。立てられるのは、その直下にある既存のフォルダだけです。
+
+ログは `~/.local/state/herdr/plugins/u-space.voice-loop/server.log` です。
+
+## ハブがすること・しないこと
+
+ハブはほかのセッションの記録を読むので、そこに紛れた指示に乗せられないよう、できることを絞ってあります。
+
+- 指示は、確認を挟まずに送ります。そのかわり、何をどこへ送ったかを必ず声で伝えます。
+- 承認や質問で止まっているセッションには、あなたの答えを伝えるだけです。中身を声で伝えたあと、あなたの次の発言で答えを聞きます。本番への反映、送信、削除など取り消しにくい操作は、もう一度聞き返します。
+- 「今後は聞かずに許可」にあたる選択肢は選びません。フォルダの信頼の確認にも答えません。
+- セッションを閉じることはしません。立てられるのは同時に3つまでです。
+- 自分ではファイルを書かず、`./hubctl` 以外のコマンドも実行しません。
+
+## 更新と、外し方
+
+herdr に更新の命令は無いので、入れ直します。設定フォルダはそのまま残ります。本体の場所や版が変わっていれば、次に herdr を起動したとき（または `start` のとき）に、常駐サービスが新しい本体に切り替わります。
+
+外すときは、`uninstall` で常駐の登録を外してから、herdr でプラグインを外します。設定フォルダは残るので、要らなければ手で消します。
+
+## 確かめてある範囲
+
+作者の Mac mini 1台（macOS、herdr 0.9.3、Claude Code 2.1）で動かしています。次のことは、まだ確かめていません。
+
+- ほかの Mac への導入
+- GitHub からの `herdr plugin install`（手元のフォルダを `herdr plugin link` で登録する形だけ確認済み）
+- Mac を再起動したあとの復帰

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="voice-loop">
+<meta name="theme-color" content="#111111">
+<!-- アイコンは spike/make_icon.py で作る（自分の画像に替えるときも同じスクリプトに渡す） -->
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<title>voice-loop</title>
+<style>
+  :root { --bg:#111; --fg:#eee; --mute:#888; --rec:#e0443e; --ok:#3ea66b; --btn:#2a2a2a; --me:#1f3a5f; --ai:#1e1e1e; --line:#2f2f2f; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system, "Hiragino Sans", sans-serif; display:flex; flex-direction:column; height:100dvh; }
+  button, select { touch-action: manipulation; }
+  #log { flex:1; overflow-y:auto; padding:12px 12px 4px; display:flex; flex-direction:column; gap:10px; -webkit-overflow-scrolling:touch; }
+  .msg { max-width:94%; padding:10px 12px; border-radius:14px; word-break:break-word; }
+  .msg.me { align-self:flex-end; background:var(--me); border-bottom-right-radius:4px; white-space:pre-wrap; }
+  .msg.ai { align-self:flex-start; background:var(--ai); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  .msg.ai.speaking { border-color: var(--ok); }
+  .msg.pending { opacity:.6; }
+  .sys { align-self:center; color:var(--mute); font-size:12px; text-align:center; }
+  /* エージェントの返信（Markdown） */
+  .md > :first-child { margin-top:0; } .md > :last-child { margin-bottom:0; }
+  .md p { margin:.5em 0; }
+  .md h1, .md h2, .md h3, .md h4 { margin:.9em 0 .4em; line-height:1.35; }
+  .md h1 { font-size:1.2em; } .md h2 { font-size:1.1em; } .md h3, .md h4 { font-size:1em; }
+  .md ul, .md ol { margin:.4em 0; padding-left:1.4em; }
+  .md li { margin:.15em 0; }
+  .md code { font:13px/1.5 ui-monospace, Menlo, monospace; background:#2b2b2b; padding:.1em .35em; border-radius:4px; }
+  .md pre { background:#0b0b0b; border:1px solid var(--line); border-radius:8px; padding:10px; overflow-x:auto; margin:.6em 0; }
+  .md pre code { background:none; padding:0; }
+  .md .tw { overflow-x:auto; margin:.6em 0; }
+  .md table { border-collapse:collapse; font-size:14px; }
+  .md th, .md td { border:1px solid #3a3a3a; padding:4px 8px; text-align:left; vertical-align:top; }
+  .md th { background:#262626; }
+  .md blockquote { margin:.5em 0; padding-left:.8em; border-left:3px solid #444; color:#bbb; }
+  .md hr { border:none; border-top:1px solid var(--line); margin:.8em 0; }
+  .md a { color:#7fb4ff; }
+  #bar { flex:none; padding:8px 12px calc(10px + env(safe-area-inset-bottom)); background:#161616; border-top:1px solid #262626; display:flex; flex-direction:column; gap:8px; }
+  #status { color:var(--mute); font-size:13px; min-height:1.6em; display:flex; align-items:center; gap:6px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--mute); flex:none; }
+  .dot.on { background:var(--ok); }
+  #tap, #hubStart { display:none; margin-left:auto; border:none; border-radius:8px; background:var(--ok); color:#fff; font-size:13px; padding:4px 10px; }
+  button:disabled, input:disabled { opacity:.35; }
+  .row { display:flex; gap:8px; }
+  select { flex:1; min-width:0; font-size:13px; padding:8px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; }
+  #agent { flex:2; }
+  #talk { flex:3; height:64px; font-size:18px; border:none; border-radius:14px; background:var(--btn); color:var(--fg); }
+  #talk.rec { background:var(--rec); }
+  #stop { flex:1; height:64px; font-size:15px; border:none; border-radius:14px; background:var(--btn); color:var(--fg); }
+  #typed { flex:1; min-width:0; font-size:16px; padding:9px 12px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:10px; }
+  #send { width:64px; font-size:14px; border:none; border-radius:10px; background:var(--btn); color:var(--fg); }
+</style>
+</head>
+<body>
+  <div id="log"></div>
+  <div id="bar">
+    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button></div>
+    <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
+    <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
+    <form id="typedForm" class="row"><input id="typed" placeholder="文字で送る" autocomplete="off"><button id="send" type="submit">送る</button></form>
+  </div>
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const setStatus = t => { $('statusText').textContent = t; };
+let ws, rec, chunks = [], mime = '', ext = 'webm';
+let agents = [], agentsSig = '', threadSource = 'jsonl', loadSeq = 0;
+
+// 端末側の出来事をサーバーのログに残す（スマホの再生不具合を後から追えるように）
+function clog(msg) { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'clientlog', msg })); } catch {} }
+
+// ---------- 履歴（選んだセッションごと。正本はセッション自身の記録） ----------
+const hasMd = !!(window.marked && window.DOMPurify);
+if (hasMd) {
+  marked.setOptions({ gfm: true, breaks: true });
+  // **「…」**を のように、閉じの ** の直前が記号で直後が文字だと標準の規則では太字にならない（日本語で頻出）。それを拾う
+  marked.use({ extensions: [{
+    name: 'cjkStrong', level: 'inline',
+    start(src) { const i = src.indexOf('**'); return i < 0 ? undefined : i; },
+    tokenizer(src) {
+      const m = /^\*\*(\S(?:[^*\n]*?\S)?)\*\*/.exec(src); // 後読みは古い Safari で構文エラーになるので使わない
+      if (m) return { type: 'strong', raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) };
+    },
+  }] });
+  DOMPurify.addHook('afterSanitizeAttributes', n => { if (n.tagName === 'A') { n.setAttribute('target', '_blank'); n.setAttribute('rel', 'noopener noreferrer'); } });
+}
+function bubble(role, text, extra = '') {
+  const el = document.createElement('div');
+  el.className = 'msg ' + role + (extra ? ' ' + extra : '');
+  if (role === 'ai' && hasMd) {
+    el.classList.add('md');
+    el.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    el.querySelectorAll('table').forEach(t => { const w = document.createElement('div'); w.className = 'tw'; t.replaceWith(w); w.appendChild(t); });
+  } else el.textContent = text;
+  $('log').appendChild(el); $('log').scrollTop = $('log').scrollHeight;
+  return el;
+}
+function sys(text) { const el = document.createElement('div'); el.className = 'sys'; el.textContent = text; $('log').appendChild(el); $('log').scrollTop = $('log').scrollHeight; }
+const curAgent = () => agents.find(a => a.pane === $('agent').value);
+const curKey = () => { const a = curAgent(); return a ? a.key : ''; }; // ハブは "hub"、ほかはセッション ID（サーバーが決める）
+const localKey = () => 'vl.thread.' + curKey();
+function localMsgs() { try { return JSON.parse(localStorage.getItem(localKey()) || '[]'); } catch { return []; } }
+function localPush(role, text) { if (threadSource !== 'none') return; try { localStorage.setItem(localKey(), JSON.stringify([...localMsgs(), { role, text }].slice(-80))); } catch {} }
+function renderThread(msgs) {
+  $('log').innerHTML = '';
+  if (!msgs.length) sys('このセッションにはまだ会話がありません');
+  msgs.forEach(m => m.role === 'note' ? sys('通知: ' + m.text) : bubble(m.role, m.text)); // note = ハブへの自動通知（頼んだ件が片づいた等）
+}
+async function loadThread() {
+  const pane = $('agent').value; if (!pane) return;
+  const seq = ++loadSeq;
+  try {
+    const r = await (await fetch('/api/history?pane=' + encodeURIComponent(pane))).json();
+    if (seq !== loadSeq) return; // 読み込み中に別のセッションへ切り替えた
+    threadSource = r.source;
+    renderThread(r.source === 'jsonl' ? r.messages : localMsgs());
+  } catch (e) { if (seq === loadSeq) sys('履歴を読めませんでした'); }
+}
+
+// ---------- セッション一覧 ----------
+// 選んでいた相手が居なくなっても、別のセッションへ自動では切り替えない。
+// 目を離して声だけで使うので、気づかないまま別の（顧客案件の）セッションに指示が飛ぶのを防ぐ。
+const WANT = 'vl.agentKey3';
+let shownPane = null; // いま履歴を出している相手
+let setupChecked = false; // 開いてから一度は、準備の残りを確かめたか
+function applyTarget() {
+  const ok = !!$('agent').value;
+  $('talk').disabled = $('send').disabled = $('typed').disabled = !ok;
+  if (!ok) setStatus('話し相手を選んでください');
+}
+async function loadAgents() {
+  let list; try { list = await (await fetch('/api/agents')).json(); } catch { return; }
+  const sig = JSON.stringify(list.map(a => [a.pane, a.key, a.title, a.status]));
+  if (sig === agentsSig) return;
+  agents = list; agentsSig = sig;
+  const saved = localStorage.getItem(WANT);
+  const want = saved === null ? 'hub' : saved; // 初めて開いたときはハブ
+  const sel = $('agent'); sel.innerHTML = '';
+  const ph = document.createElement('option'); ph.value = ''; ph.disabled = true; ph.textContent = '話し相手を選んでください'; sel.appendChild(ph);
+  for (const a of list) {
+    const o = document.createElement('option'); o.value = a.pane;
+    o.textContent = a.hub ? `ハブ｜全セッションを統括 [${a.status}]` : `${a.cwd.split('/').pop()}｜${a.title} [${a.status}]`;
+    sel.appendChild(o);
+  }
+  const keep = list.find(a => a.key === want);
+  sel.value = keep ? keep.pane : '';
+  $('hubStart').style.display = list.some(a => a.hub) ? 'none' : 'inline-block';
+  applyTarget();
+  if (sel.value === shownPane) return;
+  shownPane = sel.value;
+  if (keep) {
+    if (saved === null) localStorage.setItem(WANT, want);
+    await loadThread();
+    if (!setupChecked) { setupChecked = true; showSetup(loadSeq); } // ハブが居ても、聞き取りや声の準備が残っていることがある
+    return;
+  }
+  loadSeq++; $('log').innerHTML = '';
+  sys(want === 'hub' ? 'ハブが起動していません。「ハブを起動」を押すか、話し相手を選んでください。'
+                     : '選んでいた話し相手が見つかりません（閉じられたか、Mac が再起動されました）。選び直してください。');
+  if (want === 'hub') { setupChecked = true; showSetup(loadSeq); }
+}
+// 使い始めの準備が残っていれば、次にやることを順に出す（初回の案内）
+async function showSetup(seq) {
+  let d; try { d = await (await fetch('/api/doctor')).json(); } catch { return; }
+  const todo = d.checks.filter(c => !c.ok && !c.optional);
+  if (seq !== loadSeq || !todo.length) return;
+  sys(`準備があと ${todo.length} つ残っています。`);
+  todo.forEach((c, i) => sys(`${i + 1}. ${c.name}: ${c.todo}`));
+}
+$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus('準備できました'); loadThread(); };
+$('hubStart').onclick = async () => {
+  $('hubStart').disabled = true; setStatus('ハブを起動しています…（20秒ほど）');
+  try {
+    const r = await (await fetch('/api/hub/start', { method: 'POST' })).json();
+    if (!r.ok) throw new Error(r.detail || r.reason || '起動できませんでした');
+    localStorage.setItem(WANT, 'hub'); agentsSig = ''; await loadAgents(); setStatus('準備できました');
+  } catch (e) { sys('⚠ ハブを起動できませんでした: ' + e.message); setStatus(''); }
+  $('hubStart').disabled = false;
+};
+async function loadSpeakers() {
+  const sp = await (await fetch('/api/speakers')).json();
+  const sel = $('speaker'); sel.innerHTML = '';
+  for (const s of sp) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; sel.appendChild(o); }
+  const saved = localStorage.getItem('vl.speaker'); if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved;
+}
+const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value })); } catch {} }; // ハブからの報告を、選んでいる声で届けてもらう
+$('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
+
+// ---------- 再生 ----------
+// <audio> 要素を使う。iOS では Web Audio は消音スイッチで無音になり、操作なしの再生も止められるため、
+// タップの中で一度鳴らして（prime）以後の再生を許可させる。
+function silentWav() {
+  const n = 800, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+  const w = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVE'); w(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 8000, true); v.setUint32(28, 16000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
+  return new Blob([b], { type: 'audio/wav' });
+}
+const player = new Audio(); player.preload = 'auto';
+const SILENT_URL = URL.createObjectURL(silentWav());
+let queue = [], playing = false, nowSilent = false, curUrl = null, gen = 0, accepting = false, serverDone = true, primedLogged = false, playLogged = false, speakingEl = null;
+
+function setSession(type) { try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (e) { clog('audioSession=' + type + ' failed: ' + e.name); } }
+function showTap(on) { $('tap').style.display = on ? 'inline-block' : 'none'; }
+function prime() { // ユーザーのタップの中で呼ぶ
+  if (playing) return;
+  nowSilent = true; player.src = SILENT_URL;
+  player.play().then(() => { if (!primedLogged) { clog('audio primed (audioSession=' + (navigator.audioSession ? navigator.audioSession.type : 'n/a') + ')'); primedLogged = true; } })
+    .catch(e => { if (e.name !== 'AbortError') clog('prime failed: ' + e.name); });
+}
+function enqueue(buf) { if (!accepting) return; queue.push(buf); if (!playing) playNext(); }
+function playNext() {
+  if (!queue.length) { playing = false; if (serverDone) finishSpeaking(); return; }
+  playing = true; nowSilent = false;
+  const g = gen, buf = queue.shift();
+  if (curUrl) URL.revokeObjectURL(curUrl);
+  curUrl = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  player.src = curUrl;
+  player.play().then(() => {
+    if (g !== gen) return;
+    setStatus('話しています'); showTap(false);
+    if (!playLogged) { clog('first audio playing'); playLogged = true; }
+  }).catch(e => {
+    if (g !== gen || e.name === 'AbortError') return;
+    clog('play rejected: ' + e.name + ' ' + e.message);
+    if (e.name === 'NotAllowedError') { queue.unshift(buf); playing = false; showTap(true); setStatus('音声の再生にはタップが必要です'); }
+    else playNext();
+  });
+}
+player.addEventListener('ended', () => { if (nowSilent) { nowSilent = false; if (queue.length && !playing) playNext(); return; } playNext(); });
+player.addEventListener('error', () => { if (nowSilent || !playing) return; clog('audio error code=' + (player.error && player.error.code)); playNext(); });
+$('tap').onclick = () => { showTap(false); playNext(); };
+function stopPlayback() { gen++; queue = []; playing = false; accepting = false; player.pause(); showTap(false); if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; }
+function finishSpeaking(msg = '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
+
+// ---------- 通信 ----------
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => { $('conn').classList.add('on'); setStatus('準備できました'); applyTarget(); hello(); clog('connected ' + navigator.userAgent); };
+  ws.onclose = () => { $('conn').classList.remove('on'); setStatus('切断。再接続します…'); setTimeout(connect, 2000); };
+  ws.onmessage = async ev => {
+    if (ev.data instanceof ArrayBuffer) { enqueue(ev.data); return; }
+    const m = JSON.parse(ev.data);
+    const here = !m.pane || m.pane === $('agent').value;
+    if (m.type === 'status') setStatus(m.text);
+    else if (m.type === 'transcript') { if (here) { bubble('me', m.text, 'pending'); localPush('me', m.text); } setStatus('エージェントに送りました。考え中…'); }
+    else if (m.type === 'reply') {
+      if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + '（ハブを選ぶと読めます）'); return; } // report = 頼んだ件についての、ハブからの自発的な報告
+      await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
+      if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      const ai = $('log').querySelectorAll('.msg.ai'); speakingEl = ai[ai.length - 1] || null; if (speakingEl) speakingEl.classList.add('speaking');
+    }
+    else if (m.type === 'speaking') { accepting = true; serverDone = false; }
+    else if (m.type === 'error') { sys('⚠ ' + m.text); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
+    else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
+    else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
+  };
+}
+function sendTurnStart() { stopPlayback(); serverDone = true; }
+
+// ---------- 録音（タップ→話す→タップ） ----------
+async function startRec() {
+  if (playing || queue.length) { ws.send(JSON.stringify({ type: 'stop' })); stopPlayback(); } // 話し始めたら相手の声は止める
+  prime();
+  setSession('play-and-record');
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (e) { setSession('auto'); stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) if (MediaRecorder.isTypeSupported(m)) { mime = m; break; }
+  ext = mime.includes('mp4') ? 'mp4' : 'webm';
+  rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  chunks = [];
+  rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+  rec.onstop = async () => {
+    stream.getTracks().forEach(t => t.stop());
+    setSession('playback'); // マイクを離したら再生用に戻す（受話口から小さく鳴るのを防ぐ）
+    const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+    if (blob.size < 2000) { setStatus('短すぎました'); return; }
+    sendTurnStart();
+    if (!$('agent').value) { setStatus('話し相手を選んでください'); return; }
+    ws.send(JSON.stringify({ type: 'turn', pane: $('agent').value, key: curKey(), speaker: $('speaker').value, filename: 'rec.' + ext }));
+    ws.send(await blob.arrayBuffer());
+    setStatus('聞き取り中…');
+  };
+  rec.start();
+  $('talk').classList.add('rec'); $('talk').textContent = '話してください（タップで送る）';
+}
+function stopRec() { if (rec && rec.state !== 'inactive') rec.stop(); $('talk').classList.remove('rec'); $('talk').textContent = 'タップして話す'; }
+
+$('talk').onclick = () => { if (!$('agent').value) return; if (rec && rec.state === 'recording') stopRec(); else startRec().catch(e => { setStatus('マイクが使えません: ' + e.message); clog('mic failed: ' + e.name + ' ' + e.message); }); };
+$('stop').onclick = () => { ws.send(JSON.stringify({ type: 'stop' })); stopPlayback(); setStatus('止めました'); };
+$('typedForm').onsubmit = e => {
+  e.preventDefault(); const t = $('typed').value.trim(); if (!t || !$('agent').value) return;
+  sendTurnStart(); prime();
+  $('typed').value = ''; bubble('me', t, 'pending'); localPush('me', t);
+  ws.send(JSON.stringify({ type: 'text', text: t, pane: $('agent').value, key: curKey(), speaker: $('speaker').value }));
+  setStatus('エージェントに送りました。考え中…');
+};
+
+// ---------- 起動 ----------
+setSession('playback');
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
+setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) loadAgents(); }, 20000);
+Promise.all([loadAgents(), loadSpeakers()]).then(connect);
+</script>
+</body>
+</html>

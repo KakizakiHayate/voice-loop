@@ -1,0 +1,13 @@
+# 動かすと増えるもの・端末ごとのもの
+server.log
+*.log
+narrator_model
+gateway/
+qr.png
+.claude/
+__pycache__/
+.env*
+.vercel/
+# 試作の大きな生成物
+spike/*.wav
+spike/shots/

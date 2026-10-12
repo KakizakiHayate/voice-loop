@@ -1,0 +1,57 @@
+id = "u-space.voice-loop"
+name = "voice-loop"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "口と耳だけで herdr のエージェントと話す。スマホからトランシーバー式で、全セッションを見渡すハブつき"
+platforms = ["macos"]
+
+# このプラグインは起動役だけ。本体（server.py）は launchd の常駐サービスとして動き、herdr を閉じても Mac を再起動しても戻る。
+# どの命令も scripts/ctl.sh を通る。herdr は命令を最小限の環境で起動する（ログインシェルを通らない）ので、
+# ctl.sh が uv を探してから scripts/ctl.py に渡す。
+
+# herdr がセッションを復元し終えたあとに1回動く。サービスが降りていれば上げ、ハブが居なければ立てる。
+[[startup]]
+command = ["bash", "scripts/ctl.sh", "startup"]
+
+[[actions]]
+id = "start"
+title = "voice-loop を起動（初回の準備もここから）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "start"]
+
+[[actions]]
+id = "stop"
+title = "voice-loop を止める"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "stop"]
+
+[[actions]]
+id = "restart"
+title = "voice-loop を再起動（設定を変えたあと）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "restart"]
+
+[[actions]]
+id = "status"
+title = "voice-loop の状態"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "status"]
+
+[[actions]]
+id = "url"
+title = "voice-loop を開く URL"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "url"]
+
+[[actions]]
+id = "doctor"
+title = "voice-loop の点検（足りないものと、次にやること）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "doctor"]
+
+# サービスを降ろして登録を外す。設定とハブへの指示文は残すので、start でそのまま戻せる。
+[[actions]]
+id = "uninstall"
+title = "voice-loop の常駐を外す（設定は残す）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "uninstall"]
