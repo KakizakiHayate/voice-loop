@@ -36,8 +36,16 @@ macOS 専用です。次のものが要ります。足りないものは、あ�
 
 ### herdr と Claude Code
 
+voice-loop は、herdr と Claude Code が動いている Mac に入れます。セッションの記録と herdr を、同じ Mac の上で読むためです。Claude Code はログインを済ませておき、herdr の Claude 連携を入れます。
+
 ```sh
 herdr integration install claude
+```
+
+### uv
+
+```sh
+brew install uv
 ```
 
 ### 聞き取り（whisper）
@@ -54,11 +62,13 @@ cd ~/.local/state/whisper-work && whisper-server \
   --host 127.0.0.1 --port 8080 --inference-path /v1/audio/transcriptions -l ja --convert
 ```
 
+最後の `whisper-server` は、止めるまで動き続けます。別のタブで実行して、開いたままにしてください。
+
 `--convert` は、ブラウザの録音を ffmpeg で変換するために要ります。変換は作業フォルダに一時ファイルを書くので、書き込めるフォルダで起動してください。launchd に登録して常駐させるときは、`WorkingDirectory` を忘れると変換に失敗します。
 
 ### 声（AivisSpeech）
 
-`127.0.0.1:10101` で AivisSpeech Engine を動かします。Docker の例です（イメージは約3.7GB）。
+`127.0.0.1:10101` で AivisSpeech Engine を動かします。Docker の例です（イメージは約3.7GB）。Docker を動かすもの（OrbStack や Docker Desktop）が要ります。OrbStack なら `brew install --cask orbstack` で入れ、一度アプリを開いて初期設定を済ませます。
 
 ```sh
 docker run -d --name aivis --restart unless-stopped \
@@ -82,6 +92,20 @@ herdr plugin action invoke u-space.voice-loop.start
 手元に置いたフォルダから使うなら、`herdr plugin link <フォルダ>` で登録します。
 
 `start` は、設定フォルダにひな形を置き、常駐サービスを登録して上げ、ハブを立て、最後に点検の結果を出します。手でやることが残っていれば、番号つきで並びます。
+
+`herdr plugin action invoke` は、受け付けたことを JSON で返すだけです。結果は次の命令で読みます。1行目が `start running` なら、まだ準備の途中です。初回は必要なものの取得で数分かかることがあるので、少し待って打ち直してください。
+
+```sh
+herdr plugin log list --plugin u-space.voice-loop | python3 -c '
+import json, sys
+logs = json.load(sys.stdin)["result"]["logs"]
+if not logs: sys.exit("記録なし")
+last = logs[-1]
+print(last["action_id"], last["status"])
+print(last.get("stdout") or "", last.get("stderr") or "")'
+```
+
+「記録なし」は、プラグインが入っていないときにも出ます。入っているかどうかは `herdr plugin list` で確かめます。
 
 ## 初回に、手で答えること
 
@@ -160,3 +184,7 @@ herdr に更新の命令は無いので、入れ直します。設定フォル�
 - ほかの Mac への導入
 - GitHub からの `herdr plugin install`（手元のフォルダを `herdr plugin link` で登録する形だけ確認済み）
 - Mac を再起動したあとの復帰
+
+## ライセンス
+
+MIT です（`LICENSE`）。`static/vendor/` に同梱している marked（MIT）と DOMPurify（Apache-2.0 または MPL-2.0）は、それぞれのライセンスに従います。
