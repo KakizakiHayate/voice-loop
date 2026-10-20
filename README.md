@@ -131,6 +131,15 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 
 話し相手を選び、「タップして話す」を押して話し、もう一度押して送ります。初めて開いたときの話し相手はハブです。準備が残っていると、画面にも同じ案内が出ます。
 
+## 接続できる範囲
+
+本体は `127.0.0.1` でだけ待ち受けます。使えるのは、この Mac の上のプログラムと、Tailscale Serve を通した tailnet の端末です。
+
+- この範囲の中からなら、パスワードなしでセッションへ指示を送れます。tailnet をほかの人と共有しているときは、Tailscale のアクセス制御で、この Mac の 8790 番を自分の端末だけに絞ってください。
+- `tailscale funnel` でインターネットに公開しないでください。
+- ブラウザで開いたほかのサイトからの接続は、本体が断ります。接続元（Origin）と宛先の名前（Host）を確かめています。断ったときは、ログに `[guard]` で始まる行が残ります。
+- この Mac の名前と Tailscale の名前（〜.ts.net）以外で画面を開くときは、`config.env` の `VL_ALLOWED_HOSTS` にその名前を書きます。
+
 ## 命令
 
 どれも `herdr plugin action invoke u-space.voice-loop.<名前>` で呼びます。出力は `herdr plugin log list --plugin u-space.voice-loop` で読めます。
@@ -187,4 +196,9 @@ herdr に更新の命令は無いので、入れ直します。設定フォル�
 
 ## ライセンス
 
-MIT です（`LICENSE`）。`static/vendor/` に同梱している marked（MIT）と DOMPurify（Apache-2.0 または MPL-2.0）は、それぞれのライセンスに従います。
+MIT です（`LICENSE`）。`static/vendor/` に同梱している次のライブラリは、それぞれのライセンスに従います。本文は同じフォルダにあります。
+
+| ライブラリ | ライセンス | 本文 |
+|---|---|---|
+| marked v12.0.2 | MIT | `static/vendor/marked.LICENSE.md` |
+| DOMPurify 3.1.6 | Apache-2.0 または MPL-2.0 | `static/vendor/purify.LICENSE` |
