@@ -1145,6 +1145,53 @@ async def hub_answer(body: dict):
     return JSONResponse({"ok": True, "project": project, "title": a["title"], "said": said})
 
 
+# ---------- 画面のボタンからの返答（利用者がタップで答える） ----------
+def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
+    """画面が指している相手の、いま止まっている問い。(相手, 問い)。問いの kind は
+    permission（許可・断る）/ question（選択式。断るだけ）/ trust（端末で答える）/ unknown / none（止まっていない）/ unreadable / gone。"""
+    a = next((a for a in list_agents() if a["pane"] == pane), None)
+    if not a or (key and agent_key(a) != key):  # 開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居る
+        return None, {"kind": "gone"}
+    if a["status"] != "blocked":
+        return a, {"kind": "none"}
+    trust = pane_shows_trust(pane)
+    if trust is None or trust:
+        return a, {"kind": "unreadable" if trust is None else "trust"}
+    text = read_prompt(pane)
+    asked = asked_part(text)
+    return a, {"kind": parse_prompt(text)["kind"], "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
+
+
+@app.get("/api/prompt")
+def api_prompt(pane: str, key: str = ""):
+    return JSONResponse(_asked(pane, key)[1])
+
+
+@app.post("/api/answer")
+async def api_answer(body: dict):
+    """画面のボタンで、止まっているセッションの問いに答える。
+    守ること: 画面に出したのと同じ問いにだけ答える（指紋で確かめる）。許可は「今回だけ」（1）で、「今後は聞かずに許可」は選ばない。
+    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。フォルダの信頼の確認には答えない。"""
+    pane, key, fp = str(body.get("pane", "")), str(body.get("key", "")), str(body.get("fp", ""))
+    choice, confirmed = str(body.get("choice", "")), bool(body.get("confirmed"))
+    a, asked = await asyncio.to_thread(_asked, pane, key)
+    if asked["kind"] in ("gone", "none", "unreadable", "trust"):
+        return JSONResponse({"ok": False, "reason": asked["kind"]})
+    if asked["fp"] != fp:  # 画面に出したあとで問いが変わった
+        return JSONResponse({"ok": False, "reason": "changed", "prompt": asked})
+    if choice == "allow" and asked["kind"] == "permission":
+        if asked["risky"] and not confirmed:
+            return JSONResponse({"ok": False, "reason": "confirm"})
+        keys, said = "1", "許可（今回だけ）"
+    elif choice == "deny" and asked["kind"] in ("permission", "question"):
+        keys, said = "esc", "断る"
+    else:
+        return JSONResponse({"ok": False, "reason": "bad_choice", "kind": asked["kind"]})
+    r = await asyncio.to_thread(herdr, "agent", "send-keys", pane, keys)
+    hlog(f"answer(画面) → {pane} ({a['cwd'].rsplit('/', 1)[-1]}): {said} {'ok' if 'result' in r else 'ERR'}", flush=True)
+    return JSONResponse({"ok": True, "said": said} if "result" in r else {"ok": False, "reason": "herdr"})
+
+
 # ---------- セッションの起動 ----------
 def spawn_session(directory: Path, project: str, model: str) -> dict:
     """プロジェクトのディレクトリで Claude Code を立てる。同名のワークスペースがあればその中のタブに、無ければ作る。"""
@@ -1238,6 +1285,7 @@ async def ws(sock: WebSocket):
                 await send(type="error", text=f"送信できませんでした: {reply}")
             elif state == "blocked":
                 await send(type="status", text="承認待ちです")
+                await send(type="blocked", pane=pane)  # 画面に、許可・断るのボタンを出させる
                 await speak_to([client], "【承認待ちの画面】\n" + reply, cancel)
             elif not reply.strip():
                 await send(type="error", text="回答を読めませんでした")

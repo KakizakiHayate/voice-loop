@@ -56,11 +56,19 @@
   #stop { flex:1; height:64px; font-size:15px; border:none; border-radius:14px; background:var(--btn); color:var(--fg); }
   #typed { flex:1; min-width:0; font-size:16px; padding:9px 12px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:10px; }
   #send { width:64px; font-size:14px; border:none; border-radius:10px; background:var(--btn); color:var(--fg); }
+  [hidden] { display:none !important; }
+  /* 承認・質問で止まっている相手への返答 */
+  #ask { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1px solid #5a4a1f; border-radius:10px; background:#1c1910; }
+  #askHead { font-size:13px; color:#e6c36a; }
+  #askText { margin:0; max-height:7.5em; overflow:auto; font:12px/1.5 ui-monospace, Menlo, monospace; color:#ccc; white-space:pre-wrap; word-break:break-all; }
+  #allow, #deny { flex:1; height:44px; font-size:15px; border:none; border-radius:10px; color:#fff; }
+  #allow { background:var(--ok); } #allow.warn { background:var(--rec); } #deny { background:var(--btn); }
 </style>
 </head>
 <body>
   <div id="log"></div>
   <div id="bar">
+    <div id="ask" hidden><div id="askHead"></div><pre id="askText"></pre><div class="row"><button id="allow">許可（今回だけ）</button><button id="deny">断る</button></div></div>
     <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
@@ -157,7 +165,7 @@ async function loadAgents() {
   const keep = list.find(a => a.key === want);
   sel.value = keep ? keep.pane : '';
   $('hubStart').style.display = list.some(a => a.hub) ? 'none' : 'inline-block';
-  applyTarget();
+  applyTarget(); loadAsk();
   if (sel.value === shownPane) return;
   shownPane = sel.value;
   if (keep) {
@@ -179,7 +187,65 @@ async function showSetup(seq) {
   sys(`準備があと ${todo.length} つ残っています。`);
   todo.forEach((c, i) => sys(`${i + 1}. ${c.name}: ${c.todo}`));
 }
-$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); };
+$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); loadAsk(); };
+
+// ---------- 承認・質問への返答（ボタン） ----------
+// 選んでいる相手が承認や質問で止まっていれば、何を聞かれているかと「許可（今回だけ）」「断る」を出す。
+// 送るのは「今回だけ許可」か「断る」だけ。取り消しにくい操作に見えるときは、もう一度押してから許可する
+const ASK_HEAD = {
+  permission: '承認を待っています', question: '質問で止まっています（選ぶ答えは、ハブに話すか端末で）',
+  trust: 'フォルダを信頼するか聞いています。端末で答えてください', unknown: '入力を待っています。端末で答えてください',
+  unreadable: '止まっていますが、画面を読めませんでした',
+};
+const ANSWER_FAIL = {
+  changed: '画面が変わりました。出し直したので、確かめてから押してください', none: 'もう止まっていません',
+  gone: '話し相手が入れ替わっています。選び直してください', trust: 'フォルダの信頼は端末で答えてください',
+  unreadable: '画面を読めませんでした', confirm: 'もう一度押してください', unreachable: '接続できません', herdr: 'herdr が応答しません',
+  bad_choice: 'この問いには、そのボタンでは答えられません',
+};
+let asked = null, askSeq = 0, armed = null, followTimer = null;
+async function loadAsk() {
+  const a = curAgent(), seq = ++askSeq;
+  if (!a || a.status !== 'blocked') { showAsk(null); return; }
+  let p; try { p = await (await fetch(`/api/prompt?pane=${encodeURIComponent(a.pane)}&key=${encodeURIComponent(a.key)}`)).json(); } catch { return; }
+  if (seq === askSeq) showAsk(p.kind === 'none' || p.kind === 'gone' ? null : p);
+}
+function showAsk(p) {
+  asked = p; disarm();
+  $('ask').hidden = !p;
+  if (!p) return;
+  $('askHead').textContent = (p.kind === 'permission' && p.risky ? '⚠ 取り消しにくい操作かもしれません。' : '') + (ASK_HEAD[p.kind] || ASK_HEAD.unknown);
+  $('askText').textContent = p.text || ''; $('askText').hidden = !p.text;
+  $('allow').hidden = p.kind !== 'permission';
+  $('deny').hidden = !(p.kind === 'permission' || p.kind === 'question');
+  $('allow').disabled = $('deny').disabled = false;
+}
+function disarm() { clearTimeout(armed); armed = null; $('allow').textContent = '許可（今回だけ）'; $('allow').classList.remove('warn'); }
+async function answer(choice) {
+  const a = curAgent(); if (!asked || !a) return;
+  if (choice === 'allow' && asked.risky && !armed) { armed = setTimeout(disarm, 4000); $('allow').textContent = 'もう一度押すと許可'; $('allow').classList.add('warn'); return; }
+  const confirmed = !!armed; disarm();
+  $('allow').disabled = $('deny').disabled = true; // 二重に送らない
+  let r; try { r = await (await fetch('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: a.pane, key: a.key, fp: asked.fp, choice, confirmed }) })).json(); }
+  catch { r = { ok: false, reason: 'unreachable' }; }
+  if (r.ok) { showAsk(null); setStatus(choice === 'allow' ? '許可しました。続きを待っています…' : '断りました'); follow(); return; }
+  sys('⚠ 答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
+  loadAsk();
+}
+$('allow').onclick = () => answer('allow');
+$('deny').onclick = () => answer('deny');
+// 答えたあと、相手が片づくか、また止まるまで一覧を見に行き、最後に会話を描き直す（3秒ごと、3分まで）
+function follow() {
+  clearTimeout(followTimer); let n = 0;
+  const tick = async () => {
+    if (document.activeElement !== $('agent')) await loadAgents();
+    const a = curAgent();
+    if (a && (a.status === 'working' || (a.status === 'blocked' && n < 2)) && ++n < 60) { followTimer = setTimeout(tick, 3000); return; }
+    if ($('agent').value) await loadThread();
+    if (!asked) setStatus(linked() ? '準備できました' : UNREACHABLE);
+  };
+  followTimer = setTimeout(tick, 1500);
+}
 $('hubStart').onclick = async () => {
   $('hubStart').disabled = true; setStatus('ハブを起動しています…（20秒ほど）');
   try {
@@ -283,6 +349,7 @@ function connect() {
     else if (m.type === 'error') { sys('⚠ ' + m.text); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
     else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
     else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
+    else if (m.type === 'blocked') { if (here) loadAgents().then(loadAsk); } // 話している相手が承認で止まった → ボタンを出す
   };
 }
 function linked() { return !!ws && ws.readyState === 1; }
