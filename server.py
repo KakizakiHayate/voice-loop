@@ -1146,25 +1146,38 @@ async def hub_answer(body: dict):
 
 
 # ---------- 画面のボタンからの返答（利用者がタップで答える） ----------
-def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
-    """画面が指している相手の、いま止まっている問い。(相手, 問い)。問いの kind は
-    permission（許可・断る）/ question（選択式。断るだけ）/ trust（端末で答える）/ unknown / none（止まっていない）/ unreadable / gone。"""
-    a = next((a for a in list_agents() if a["pane"] == pane), None)
-    if not a or not key or agent_key(a) != key:  # key は必須。開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居ることがある
-        return None, {"kind": "gone"}
+# ボタンを出して答えられるのは、承認の画面（選択肢の 1 が Yes で、No もある）だけ。画面の文字の読み取りは揺れるので、
+# それ以外（選択式の質問・フォルダの信頼・読めない・わからない）は中身を見せるだけで、キーは送らない
+def _ask_of(a: dict) -> dict:
+    """止まっているセッション a の問い。kind は permission / question / trust / unknown / none（止まっていない）/ unreadable。"""
     if a["status"] != "blocked":
-        return a, {"kind": "none"}
-    trust = pane_shows_trust(pane)
+        return {"kind": "none"}
+    trust = pane_shows_trust(a["pane"])
     if trust is None or trust:
-        return a, {"kind": "unreadable" if trust is None else "trust"}
-    text = read_prompt(pane)
+        return {"kind": "unreadable" if trust is None else "trust"}
+    text = read_prompt(a["pane"])
     asked = asked_part(text)
-    return a, {"kind": parse_prompt(text)["kind"], "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
+    return {"kind": parse_prompt(text)["kind"], "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
 
 
-@app.get("/api/prompt")
-def api_prompt(pane: str, key: str = ""):
-    return JSONResponse(_asked(pane, key)[1])
+def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
+    """pane と key が指すセッションと、その問い。key は必須（開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居ることがある）。"""
+    a = next((a for a in list_agents() if a["pane"] == pane), None)
+    if not a or not key or agent_key(a) != key:
+        return None, {"kind": "gone"}
+    return a, _ask_of(a)
+
+
+@app.get("/api/prompts")
+def api_prompts():
+    """止まっているセッションすべての問い。画面はこれを上に並べ、承認の画面にだけボタンを出す。"""
+    out = []
+    for a in list_agents():
+        if a["status"] == "blocked":
+            asked = _ask_of(a)
+            if asked["kind"] != "none":
+                out.append({"pane": a["pane"], "key": agent_key(a), "name": "ハブ" if a["hub"] else f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}", **asked})
+    return JSONResponse(out)
 
 
 _answer_lock = asyncio.Lock()  # 確かめてからキーを送るまでを、一度にひとつだけにする
@@ -1176,7 +1189,8 @@ ANSWERED_HOLD = 15  # 答えたあと、相手の状態が変わるまでのあ�
 async def api_answer(body: dict):
     """画面のボタンで、止まっているセッションの問いに答える。
     守ること: 画面に出したのと同じ問いにだけ答える（指紋で確かめる）。許可は「今回だけ」（1）で、「今後は聞かずに許可」は選ばない。
-    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。フォルダの信頼の確認には答えない。同じ問いに二度答えない。"""
+    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。承認の画面と見分けられないもの（質問・フォルダの信頼など）には答えない。
+    同じ問いに二度答えない。"""
     async with _answer_lock:
         return await _answer(body)
 
@@ -1188,18 +1202,18 @@ async def _answer(body: dict):
     if done and done[0] == fp and time.time() - done[1] < ANSWERED_HOLD:  # 二度押し・重ねた送信
         return JSONResponse({"ok": False, "reason": "answered"})
     a, asked = await asyncio.to_thread(_asked, pane, key)
-    if asked["kind"] in ("gone", "none", "unreadable", "trust"):
-        return JSONResponse({"ok": False, "reason": asked["kind"]})
+    if asked["kind"] != "permission":  # 承認の画面と見分けられないときは、何も送らない
+        return JSONResponse({"ok": False, "reason": asked["kind"] if asked["kind"] in ("gone", "none", "unreadable", "trust") else "not_permission"})
     if asked["fp"] != fp:  # 画面に出したあとで問いが変わった
-        return JSONResponse({"ok": False, "reason": "changed", "prompt": asked})
-    if choice == "allow" and asked["kind"] == "permission":
+        return JSONResponse({"ok": False, "reason": "changed"})
+    if choice == "allow":
         if asked["risky"] and not confirmed:
             return JSONResponse({"ok": False, "reason": "confirm"})
         keys, said = "1", "許可（今回だけ）"
-    elif choice == "deny" and asked["kind"] in ("permission", "question"):
+    elif choice == "deny":
         keys, said = "esc", "断る"
     else:
-        return JSONResponse({"ok": False, "reason": "bad_choice", "kind": asked["kind"]})
+        return JSONResponse({"ok": False, "reason": "bad_choice"})
     r = await asyncio.to_thread(herdr, "agent", "send-keys", pane, keys)
     hlog(f"answer(画面) → {pane} ({a['cwd'].rsplit('/', 1)[-1]}): {said} {'ok' if 'result' in r else 'ERR'}", flush=True)
     if "result" not in r:

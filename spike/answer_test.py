@@ -48,7 +48,7 @@ s.herdr = lambda *a, **k: (state["sent"].append(a[-1]), {"result": {}})[1] if a[
 
 
 def prompt(key="sess-1"):
-    return json.loads(s.api_prompt("w9:p1", key).body)
+    return s._asked("w9:p1", key)[1]
 
 
 def answer(keep=False, **body):
@@ -131,9 +131,8 @@ check("取り消しにくくても、断るはすぐ", answer(fp=fp, choice="den
 
 case("質問への返答", screen=QUESTION)
 fp = prompt()["fp"]
-r, sent = answer(fp=fp, choice="allow")
-check("質問に許可は送らない", (r["reason"], sent), ("bad_choice", []))
-check("質問は断れる", answer(fp=fp, choice="deny")[1], ["esc"])
+check("質問には、許可も断るも送らない（承認の画面だけに答える）",
+      [(answer(fp=fp, choice=c)[0]["reason"], state["sent"]) for c in ("allow", "deny")], [("not_permission", []), ("not_permission", [])])
 
 case("わからない画面", screen=UNKNOWN)
 fp = prompt()["fp"]
@@ -143,6 +142,21 @@ for name, st in (("信頼", {"trust": True}), ("読めない", {"trust": None}),
     case(name, **st)
     r, sent = answer(fp=fp, choice="allow")
     check(f"{name}のときは送らない", (r["ok"], sent), (False, []))
+
+# 止まっているセッションすべての一覧（画面の上に並べるもの）
+AGENTS = {"w1:p1": ("sess-a", "blocked", PERMISSION, False), "w2:p1": ("sess-b", "blocked", RISKY, False),
+          "w3:p1": ("sess-c", "blocked", QUESTION, False), "w4:p1": ("sess-d", "blocked", "", True), "w5:p1": ("sess-e", "working", "", False)}
+s.list_agents = lambda: [{**AGENT, "pane": p, "session": k, "status": st, "title": f"t{p[1]}", "cwd": f"/x/proj{p[1]}"}
+                         for p, (k, st, _, _) in AGENTS.items()]
+s.read_prompt = lambda pane: AGENTS[pane][2]
+s.pane_shows_trust = lambda pane: AGENTS[pane][3]
+got = json.loads(s.api_prompts().body)
+check("一覧は止まっているものだけ・順番どおり", [g["pane"] for g in got], ["w1:p1", "w2:p1", "w3:p1", "w4:p1"])
+check("一覧の中身（名前・key・種類・取り消しにくいか）",
+      [(g["name"], g["key"], g["kind"], g.get("risky")) for g in got],
+      [("proj1｜t1", "sess-a", "permission", False), ("proj2｜t2", "sess-b", "permission", True),
+       ("proj3｜t3", "sess-c", "question", False), ("proj4｜t4", "sess-d", "trust", None)])
+check("一覧の指紋は、それぞれの問いのもの", [g.get("fp") == s.prompt_fp(AGENTS[g["pane"]][2]) for g in got[:3]], [True, True, True])
 
 bad = [f"{n}: {g!r}（期待 {w!r}）" for n, ok, g, w in results if not ok]
 print("\n".join(bad) or f"{len(results)} 例、すべて期待どおり")

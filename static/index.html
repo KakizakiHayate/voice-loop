@@ -57,18 +57,20 @@
   #typed { flex:1; min-width:0; font-size:16px; padding:9px 12px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:10px; }
   #send { width:64px; font-size:14px; border:none; border-radius:10px; background:var(--btn); color:var(--fg); }
   [hidden] { display:none !important; }
-  /* 承認・質問で止まっている相手への返答 */
-  #ask { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1px solid #5a4a1f; border-radius:10px; background:#1c1910; }
-  #askHead { font-size:13px; color:#e6c36a; }
-  #askText { margin:0; max-height:7.5em; overflow:auto; font:12px/1.5 ui-monospace, Menlo, monospace; color:#ccc; white-space:pre-wrap; word-break:break-all; }
-  #allow, #deny { flex:1; height:44px; font-size:15px; border:none; border-radius:10px; color:#fff; }
-  #allow { background:var(--ok); } #allow.warn { background:var(--rec); } #deny { background:var(--btn); }
+  /* 承認で止まっているセッション（画面の上に並べる） */
+  #asks { flex:none; max-height:45dvh; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:calc(8px + env(safe-area-inset-top)) 12px 8px; background:#161616; border-bottom:1px solid #262626; }
+  #asks:empty { display:none; }
+  .ask { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1px solid #5a4a1f; border-radius:10px; background:#1c1910; }
+  .ask .head { font-size:13px; color:#e6c36a; }
+  .ask pre { margin:0; max-height:6em; overflow:auto; font:12px/1.5 ui-monospace, Menlo, monospace; color:#ccc; white-space:pre-wrap; word-break:break-all; }
+  .ask button { flex:1; height:44px; font-size:15px; border:none; border-radius:10px; color:#fff; }
+  .ask .allow { background:var(--ok); } .ask .allow.warn { background:var(--rec); } .ask .deny { background:var(--btn); }
 </style>
 </head>
 <body>
+  <div id="asks"></div>
   <div id="log"></div>
   <div id="bar">
-    <div id="ask" hidden><div id="askHead"></div><pre id="askText"></pre><div class="row"><button id="allow">許可（今回だけ）</button><button id="deny">断る</button></div></div>
     <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
@@ -165,7 +167,7 @@ async function loadAgents() {
   const keep = list.find(a => a.key === want);
   sel.value = keep ? keep.pane : '';
   $('hubStart').style.display = list.some(a => a.hub) ? 'none' : 'inline-block';
-  applyTarget(); loadAsk();
+  applyTarget();
   if (sel.value === shownPane) return;
   shownPane = sel.value;
   if (keep) {
@@ -187,77 +189,75 @@ async function showSetup(seq) {
   sys(`準備があと ${todo.length} つ残っています。`);
   todo.forEach((c, i) => sys(`${i + 1}. ${c.name}: ${c.todo}`));
 }
-$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); showAsk(null); loadAsk(); };
+$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); };
 
-// ---------- 承認・質問への返答（ボタン） ----------
-// 選んでいる相手が承認や質問で止まっていれば、何を聞かれているかと「許可（今回だけ）」「断る」を出す。
-// 送るのは「今回だけ許可」か「断る」だけ。取り消しにくい操作に見えるときは、もう一度押してから許可する
+// ---------- 承認で止まっているセッションへの返答（ボタン） ----------
+// 話し相手（ハブなど）の画面のまま、承認で止まっているセッションをすべて画面の上に並べる（名前・聞かれている中身・許可（今回だけ）・断る）。
+// ボタンを出すのは、本体が承認の画面と見分けたときだけ。それ以外は中身を見せるだけにする（画面の文字の読み取りは揺れるので、出さないほうに倒す）。
+// 押すと、送る直前に本体が同じ問いか（指紋）を確かめる。取り消しにくい操作に見えるときは、もう一度押してから許可する
 const ASK_HEAD = {
-  permission: '承認を待っています', question: '質問で止まっています（選ぶ答えは、ハブに話すか端末で）',
+  permission: '承認を待っています', question: '質問で止まっています。端末かハブで答えてください',
   trust: 'フォルダを信頼するか聞いています。端末で答えてください', unknown: '入力を待っています。端末で答えてください',
   unreadable: '止まっていますが、画面を読めませんでした',
 };
 const ANSWER_FAIL = {
-  changed: '画面が変わりました。出し直したので、確かめてから押してください', none: 'もう止まっていません',
-  gone: '話し相手が入れ替わっています。選び直してください', trust: 'フォルダの信頼は端末で答えてください',
+  changed: '画面が変わっていました。出し直したので、確かめてから押してください', none: 'もう止まっていません',
+  gone: 'セッションが入れ替わっていました', not_permission: '承認の画面と見分けられませんでした', trust: 'フォルダの信頼は端末で答えてください',
   unreadable: '画面を読めませんでした', confirm: 'もう一度押してください', unreachable: '接続できません', herdr: 'herdr が応答しません',
-  bad_choice: 'この問いには、そのボタンでは答えられません', answered: 'もう答えています',
+  bad_choice: 'そのボタンでは答えられません', answered: 'もう答えています',
 };
-// asked は、出している問いと、それがどの相手（pane・key）のものか。答えるときは、選んでいる相手と一致するかを確かめる
-let asked = null, askSeq = 0, armed = null, answering = false, followTimer = null;
-const sameAgent = (a, p) => !!a && !!p && a.pane === p.pane && a.key === p.key;
-async function loadAsk() {
-  if (answering) return; // 送っている途中は出し直さない（ボタンが押せる状態に戻って、二重に送るのを防ぐ）
-  const a = curAgent(), seq = ++askSeq;
-  if (!sameAgent(a, asked)) showAsk(null); // 別の相手の問いと「もう一度押すと許可」を残さない
-  if (!a || a.status !== 'blocked') { showAsk(null); return; }
-  let p; try { p = await (await fetch(`/api/prompt?pane=${encodeURIComponent(a.pane)}&key=${encodeURIComponent(a.key)}`)).json(); } catch { return; }
-  if (seq === askSeq && !answering && sameAgent(curAgent(), a)) showAsk(p.kind === 'none' || p.kind === 'gone' ? null : { ...p, pane: a.pane, key: a.key });
+const asks = new Map(); // pane → 並べている欄 { q: 問い, el, armed, busy }
+const answered = {}; // pane → [指紋, 時刻]。答えたばかりの問いは、一覧の状態が追いつくまで出し直さない
+let asksSeq = 0;
+async function loadAsks() {
+  const seq = ++asksSeq;
+  let list; try { list = await (await fetch('/api/prompts')).json(); } catch { list = []; } // 読めないときは、ボタンを出さないほうに倒す
+  if (seq !== asksSeq) return;
+  const now = Date.now();
+  // 答えたばかりのセッションは、3秒のあいだは中身を問わず、同じ問いなら15秒のあいだ出し直さない
+  // （答えた直後は、herdr の状態がまだ「止まっている」で、画面は書き換わる途中のため）
+  list = list.filter(q => { const d = answered[q.pane], age = d ? now - d[1] : Infinity; return !(age < 3000 || (d && d[0] === q.fp && age < 15000)); });
+  const shown = new Set(list.map(q => q.pane));
+  for (const [pane, item] of asks) if (!shown.has(pane) && !item.busy) { disarm(item); item.el.remove(); asks.delete(pane); }
+  for (const q of list) {
+    const item = asks.get(q.pane);
+    if (item && (item.busy || (item.q.key === q.key && item.q.fp === q.fp && item.q.kind === q.kind))) continue; // 同じ問いはそのまま（「もう一度押すと許可」も残す）
+    const el = renderAsk(q);
+    if (item) { disarm(item); item.el.replaceWith(el); } else $('asks').appendChild(el);
+    asks.set(q.pane, { q, el, armed: null, busy: false });
+  }
 }
-function showAsk(p) {
-  asked = p; disarm();
-  $('ask').hidden = !p;
-  if (!p) return;
-  $('askHead').textContent = (p.kind === 'permission' && p.risky ? '⚠ 取り消しにくい操作かもしれません。' : '') + (ASK_HEAD[p.kind] || ASK_HEAD.unknown);
-  $('askText').textContent = p.text || ''; $('askText').hidden = !p.text;
-  $('allow').hidden = p.kind !== 'permission';
-  $('deny').hidden = !(p.kind === 'permission' || p.kind === 'question');
-  $('allow').disabled = $('deny').disabled = answering;
+function renderAsk(q) {
+  const el = document.createElement('div'), head = document.createElement('div');
+  el.className = 'ask'; el.dataset.pane = q.pane; head.className = 'head';
+  head.textContent = `${q.name}｜` + (q.kind === 'permission' && q.risky ? '⚠ 取り消しにくい操作かもしれません。' : '') + (ASK_HEAD[q.kind] || ASK_HEAD.unknown);
+  el.appendChild(head);
+  if (q.text) { const pre = document.createElement('pre'); pre.textContent = q.text; el.appendChild(pre); }
+  if (q.kind === 'permission') {
+    const row = document.createElement('div'); row.className = 'row';
+    for (const [choice, label] of [['allow', '許可（今回だけ）'], ['deny', '断る']]) {
+      const b = document.createElement('button'); b.className = choice; b.textContent = label; b.onclick = () => answer(q.pane, choice); row.appendChild(b);
+    }
+    el.appendChild(row);
+  }
+  return el;
 }
-function disarm() { clearTimeout(armed); armed = null; $('allow').textContent = '許可（今回だけ）'; $('allow').classList.remove('warn'); }
-async function answer(choice) {
-  const q = asked;
-  if (!q || answering) return;
-  if (!sameAgent(curAgent(), q)) { showAsk(null); loadAsk(); return; } // 出している問いが、選んでいる相手のものでない
-  if (choice === 'allow' && q.risky && !armed) { armed = setTimeout(disarm, 4000); $('allow').textContent = 'もう一度押すと許可'; $('allow').classList.add('warn'); return; }
-  const confirmed = !!armed; disarm();
-  answering = true; $('allow').disabled = $('deny').disabled = true; // 二重に送らない
+function disarm(item) {
+  clearTimeout(item.armed); item.armed = null;
+  const b = item.el.querySelector('.allow'); if (b) { b.textContent = '許可（今回だけ）'; b.classList.remove('warn'); }
+}
+async function answer(pane, choice) {
+  const item = asks.get(pane); if (!item || item.busy) return;
+  const { q, el } = item, allow = el.querySelector('.allow');
+  if (choice === 'allow' && q.risky && !item.armed) { item.armed = setTimeout(() => disarm(item), 4000); allow.textContent = 'もう一度押すと許可'; allow.classList.add('warn'); return; }
+  const confirmed = !!item.armed; disarm(item);
+  item.busy = true; el.querySelectorAll('button').forEach(b => { b.disabled = true; }); // 二重に送らない
   let r; try { r = await (await fetch('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: q.pane, key: q.key, fp: q.fp, choice, confirmed }) })).json(); }
   catch { r = { ok: false, reason: 'unreachable' }; }
-  answering = false;
-  if (!sameAgent(curAgent(), q)) { // 送っている間に別の相手へ切り替えた → その相手の問いを出し直す（送った相手の続きは追わない）
-    if (!r.ok) sys('⚠ 前の相手に答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
-    showAsk(null); loadAsk(); return;
-  }
-  if (r.ok) { showAsk(null); setStatus(choice === 'allow' ? '許可しました。続きを待っています…' : '断りました'); follow(q); return; }
-  sys('⚠ 答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
-  showAsk(null); loadAsk();
-}
-$('allow').onclick = () => answer('allow');
-$('deny').onclick = () => answer('deny');
-// 答えたあと、相手（target）が片づくか、また止まるまで一覧を見に行き、最後に会話を描き直す（3秒ごと、3分まで）。
-// 途中で別の相手に切り替えたら追うのをやめる
-function follow(target) {
-  clearTimeout(followTimer); let n = 0;
-  const tick = async () => {
-    if (document.activeElement !== $('agent')) await loadAgents();
-    const a = curAgent();
-    if (!sameAgent(a, target)) return;
-    if (a.status === 'working' || (a.status === 'blocked' && n < 2)) { if (++n < 60) { followTimer = setTimeout(tick, 3000); return; } }
-    if ($('agent').value) await loadThread();
-    if (!asked) setStatus(linked() ? '準備できました' : UNREACHABLE);
-  };
-  followTimer = setTimeout(tick, 1500);
+  item.busy = false; el.remove(); asks.delete(pane);
+  if (r.ok) { answered[pane] = [q.fp, Date.now()]; sys(`${q.name} に「${r.said}」を送りました`); }
+  else sys(`⚠ ${q.name} に答えを送れませんでした: ` + (ANSWER_FAIL[r.reason] || r.reason));
+  setTimeout(loadAsks, 1500); // 出し直す（問いが変わっていれば、新しい中身で）
 }
 $('hubStart').onclick = async () => {
   $('hubStart').disabled = true; setStatus('ハブを起動しています…（20秒ほど）');
@@ -362,7 +362,7 @@ function connect() {
     else if (m.type === 'error') { sys('⚠ ' + m.text); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
     else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
     else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
-    else if (m.type === 'blocked') { if (here) loadAgents().then(loadAsk); } // 話している相手が承認で止まった → ボタンを出す
+    else if (m.type === 'blocked') loadAsks(); // 話している相手が承認で止まった → すぐ並べる
   };
 }
 function linked() { return !!ws && ws.readyState === 1; }
@@ -371,6 +371,7 @@ async function catchUp() {
   await ensureSpeakers();
   agentsSig = ''; shownPane = null; // 一覧と履歴を描き直させる
   await loadAgents();
+  loadAsks();
 }
 // 声の一覧がまだ無ければ読む。読めなければ、つながっている間は3秒ごとに読み直す（重ねて読みに行かない）
 let speakersBusy = false;
@@ -429,9 +430,11 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
 window.addEventListener('online', () => connect());
 setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) { loadAgents(); ensureSpeakers(); } }, 20000);
+setInterval(() => { if (!document.hidden) loadAsks(); }, 5000); // 承認で止まっているセッションを、話し相手の画面のまま上に並べる
+loadAsks();
 // 一覧と声を読んでからつなぐ。届かないときは5秒で見切って案内を出し、つなぎに行く（つながりしだい catchUp で取り直す）
 Promise.race([Promise.allSettled([loadAgents(), ensureSpeakers()]).then(() => true), new Promise(r => setTimeout(() => r(false), 5000))])
-  .then(answered => { if (!answered) setStatus(UNREACHABLE); connect(); });
+  .then(replied => { if (!replied) setStatus(UNREACHABLE); connect(); });
 </script>
 </body>
 </html>
