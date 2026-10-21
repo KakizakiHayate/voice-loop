@@ -5,7 +5,7 @@
 """voice-loop: トランシーバー式で herdr のエージェントと声で話す中継サーバー。
 
 ブラウザ(タップ→話す→タップ) → whisper-server → herdr agent prompt → セッション記録(JSONL)から返信を読む
-→ 語り手(Haiku, stream) → 文ごとに AivisSpeech → ブラウザで再生
+→ 語り手(Haiku, stream) → 文ごとに声のエンジン（AivisSpeech か VOICEVOX） → ブラウザで再生
 
 話し相手は個別のセッションか「ハブ」。ハブは hub/ で動く Claude Code セッションで、hubctl 経由で
 他の全セッションの状況を読み、指示を送る（/api/hub/*）。
@@ -59,7 +59,15 @@ def _load_config_env():
 
 _load_config_env()
 WHISPER = os.environ.get("VL_WHISPER", "http://127.0.0.1:8080/v1/audio/transcriptions")
-AIVIS = os.environ.get("VL_AIVIS", "http://127.0.0.1:10101")
+# 声のエンジン。どちらも同じ形の API（audio_query → synthesis）で、違うのは呼び先と既定の声だけ
+VOICE_ENGINES = {
+    "aivis": ("AivisSpeech", "http://127.0.0.1:10101", 888753760),  # まお / ノーマル
+    "voicevox": ("VOICEVOX", "http://127.0.0.1:50021", 8),  # 春日部つむぎ / ノーマル。軽い（2026-10-21 実測: 1文 0.9秒・待機 78MB）
+}
+VOICE = os.environ.get("VL_VOICE", "aivis").strip().lower()
+VOICE_NAME, _voice_url, _voice_speaker = VOICE_ENGINES.get(VOICE, VOICE_ENGINES["aivis"])  # 知らない名前なら AivisSpeech で動き、点検で知らせる
+# VL_AIVIS は 0.2 までの名前。名前のとおり AivisSpeech のときだけ効かせ、VOICEVOX に替えた人の呼び先を古い値で上書きしない
+TTS_URL = os.environ.get("VL_VOICE_URL") or (os.environ.get("VL_AIVIS") if VOICE_NAME == "AivisSpeech" else None) or _voice_url
 # 語り手（返答を話し言葉に直す軽いモデル）。既定は NARRATOR_MODEL。narrator_model というファイルに1行書けば、再起動なしで切り替わる
 #   名前に "/" が無い … Anthropic 直結。認証は `ant auth login` のプロフィール（~/.config/anthropic/）。API キー不要
 #   名前に "/" がある … Vercel AI Gateway（OpenAI 互換）。認証は gateway/ に紐づけた Vercel プロジェクトの OIDC トークン
@@ -93,7 +101,7 @@ HUB_DIR = CONFIG_DIR / "hub"  # ここを作業ディレクトリにしている
 HUB_MODEL = os.environ.get("VL_HUB_MODEL", "sonnet")
 HUB_WORKSPACE = os.environ.get("VL_HUB_WORKSPACE", "")  # ハブのタブを作る herdr ワークスペースの名前。空なら先頭のワークスペース
 HUB_SETTLE = float(os.environ.get("VL_HUB_SETTLE", "30"))  # 起動時、herdr 自身のセッション復元が落ち着くのを待つ秒数
-DEFAULT_SPEAKER = int(os.environ.get("VL_DEFAULT_SPEAKER", "888753760"))  # 画面が声を知らせてこないときの声（まお / ノーマル）
+DEFAULT_SPEAKER = int(os.environ.get("VL_DEFAULT_SPEAKER") or _voice_speaker)  # 画面が声を知らせてこないときの声
 NOTE_PREFIX = "[voice-loop 通知]"  # ハブへの自動通知の目印。ユーザーの発言と区別する
 WATCH_TIMEOUT = 3 * 3600  # 頼んだ件を見張る上限
 # herdr 経由の文は、改行があるか約800字を超えると Claude Code が「貼り付けられた内容」として包み、
@@ -443,11 +451,11 @@ def transcribe(audio: bytes, filename: str) -> str:
 def synth(text: str, speaker: int) -> bytes:
     text = READING_RE.sub(lambda m: READINGS[m.group(1).lower()], text)
     q = urllib.request.urlopen(
-        urllib.request.Request(f"{AIVIS}/audio_query?" + urllib.parse.urlencode({"text": text, "speaker": speaker}), method="POST"),
+        urllib.request.Request(f"{TTS_URL}/audio_query?" + urllib.parse.urlencode({"text": text, "speaker": speaker}), method="POST"),
         timeout=60,
     ).read()
     return urllib.request.urlopen(
-        urllib.request.Request(f"{AIVIS}/synthesis?speaker={speaker}", data=q, headers={"Content-Type": "application/json"}, method="POST"),
+        urllib.request.Request(f"{TTS_URL}/synthesis?speaker={speaker}", data=q, headers={"Content-Type": "application/json"}, method="POST"),
         timeout=120,
     ).read()
 
@@ -593,8 +601,9 @@ def api_history(pane: str):
 
 @app.get("/api/speakers")
 def api_speakers():
-    data = json.loads(urllib.request.urlopen(f"{AIVIS}/speakers", timeout=10).read())
-    return JSONResponse([{"id": st["id"], "name": f"{s['name']} / {st['name']}"} for s in data for st in s["styles"]])
+    data = json.loads(urllib.request.urlopen(f"{TTS_URL}/speakers", timeout=10).read())
+    return JSONResponse([{"id": st["id"], "name": f"{s['name']} / {st['name']}", "default": st["id"] == DEFAULT_SPEAKER}
+                         for s in data for st in s["styles"]])
 
 
 # ---------- ハブが使う道具（hubctl から呼ばれる） ----------
@@ -728,12 +737,14 @@ def doctor():
     add("聞き取り（whisper）", not problem, problem)
     speakers = []
     try:
-        speakers = [st["id"] for s in json.loads(urllib.request.urlopen(f"{AIVIS}/speakers", timeout=5).read()) for st in s["styles"]]
+        speakers = [st["id"] for s in json.loads(urllib.request.urlopen(f"{TTS_URL}/speakers", timeout=5).read()) for st in s["styles"]]
     except Exception:
         pass
-    add("声（AivisSpeech）", bool(speakers), f"AivisSpeech が {AIVIS} で動いていません。起動してください（Docker なら OrbStack などが動いているかも確認）。入れ方は README の「準備」にあります")
+    if VOICE not in VOICE_ENGINES:
+        add("声のエンジンの設定", False, f"config.env の VL_VOICE={VOICE!r} は知らない名前です。{' か '.join(VOICE_ENGINES)} にしてください（いまは AivisSpeech で動いています）")
+    add(f"声（{VOICE_NAME}）", bool(speakers), f"{VOICE_NAME} が {TTS_URL} で動いていません。起動してください（Docker なら OrbStack などが動いているかも確認）。入れ方は README の「準備」にあります")
     if speakers:
-        add("既定の声", DEFAULT_SPEAKER in speakers, f"既定の声（ID {DEFAULT_SPEAKER}）が AivisSpeech にありません。config.env の VL_DEFAULT_SPEAKER を、入っている声の ID にしてください")
+        add("既定の声", DEFAULT_SPEAKER in speakers, f"既定の声（ID {DEFAULT_SPEAKER}）が {VOICE_NAME} にありません。config.env の VL_DEFAULT_SPEAKER を、入っている声の ID にしてください")
     model = narrator_model()
     if "/" in model:
         linked, left = (GATEWAY_DIR / ".vercel").is_dir(), _saved_gateway_token()[1]
@@ -831,7 +842,7 @@ async def speak_to(clients: list[Client], text: str, cancel: asyncio.Event):
     await each(lambda c: c.send(type="speaking"))  # これ以降の音声がこのターンのもの（止めた後に届く古い音声と区別する）
     n = 0
     async for sentence in narrate(text, cancel):
-        voice = {c: c.speaker or DEFAULT_SPEAKER for c in alive}
+        voice = {c: DEFAULT_SPEAKER if c.speaker is None else c.speaker for c in alive}  # VOICEVOX では 0 も声の ID
         wavs = {sp: await asyncio.to_thread(synth, sentence, sp) for sp in set(voice.values())}
         if cancel.is_set() or not alive:
             break
@@ -1246,7 +1257,7 @@ async def ws(sock: WebSocket):
             if msg.get("text") is not None:
                 d = json.loads(msg["text"])
                 if d["type"] == "hello":  # 画面が選んでいる声（ハブからの報告を、その声で届けるため）
-                    client.speaker = int(d["speaker"]) if d.get("speaker") else None
+                    client.speaker = None if d.get("speaker") in (None, "") else int(d["speaker"])
                     continue
                 if d["type"] == "stop":
                     cancel.set()
