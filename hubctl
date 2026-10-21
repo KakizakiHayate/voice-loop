@@ -12,6 +12,8 @@
                                   設定した置き場所の直下にあるプロジェクトに、新しいセッションを立てる（既定のモデルは opus）
   hubctl answer <pane> <yes|no|番号> [--confirmed]
                                   承認・質問で止まっているセッションに、ユーザーの答えを伝える
+  hubctl close <pane> [--confirmed]
+                                  要らなくなったセッションを閉じる（1回目は閉じずに相手を返す。ユーザーが次の発言で許可したら --confirmed）
 """
 import argparse
 import json
@@ -158,9 +160,33 @@ def cmd_start(a):
         "no_projects_dir": "セッションを立てる場所がまだ設定されていません。利用者が config.env の VL_PROJECTS_DIR に、プロジェクトの置き場所を書く必要があります。",
         "bad_model": "モデルは " + " / ".join(r.get("models", [])) + " から選んでください。",
         "too_long": f"最初の指示が長すぎます（{r.get('length')}字。上限 {r.get('max')}字・一段落）。",
-        "limit": f"ハブが立てたセッションが上限（{r.get('max')}つ）に達しています: " + " ／ ".join(r.get("live", [])) + "。どれかが閉じられるまで立てられません。閉じるのはユーザーです。",
     }.get(why, f"{why or r}")
     sys.exit("立てていません: " + msg)
+
+
+def cmd_close(a):
+    r = call("close", body={"pane": a.pane, "confirmed": a.confirmed})
+    why = r.get("reason")
+    if r.get("ok"):
+        print(f"閉じました → [{a.pane}] {r['project']}｜{r['title']}（タブも閉じました。会話の記録は残っています）")
+        return
+    if why == "confirm":
+        stops = {"working": "作業中なので、閉じると作業が途中で止まります。", "blocked": "承認・入力待ちで止まっています。閉じると、その問いには答えないまま終わります。"}
+        sys.exit(
+            "まだ閉じていません。閉じると取り消せないので、ユーザーのはっきりした許可が要ります。"
+            "どのセッションを閉じるかを、プロジェクト名と直近の依頼でユーザーに伝えて「閉じていいですか」と聞き、"
+            f"ユーザーが次の発言ではっきり許可したら `./hubctl close {a.pane} --confirmed` を実行してください。"
+            "あいまいな答えのときや、ユーザーが別の話をはさんだときは閉じません。\n"
+            f"\n閉じる相手: [{a.pane}] {r['project']}｜{r['title']}　状態: {STATUS.get(r['status'], r['status'])}"
+            f"{'　' + stops[r['status']] if r['status'] in stops else ''}\n{QUOTE_NOTE}\n直近の依頼: {one_line(r['last_user'])}")
+    msg = {
+        "reporting": "いまは自動通知への応答中です。通知をきっかけにセッションは閉じられません。",
+        "same_turn": "閉じていいかを聞いたのと同じ発言の中では閉じられません。ユーザーはまだ何を閉じるか聞いていないからです。"
+                     "中身を伝えて「閉じていいですか」と聞き、ユーザーの次の発言ではっきり許可されたら実行してください。",
+        "gone": f"セッションが見つかりません: {a.pane}（もう閉じられているか、ハブ自身です）。",
+        "herdr": "herdr が閉じられませんでした。少し待ってから `./hubctl sessions` で様子を確かめてください。",
+    }.get(why, f"{why or r}")
+    sys.exit("閉じていません: " + msg)
 
 
 p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -171,5 +197,6 @@ s = sub.add_parser("screen"); s.add_argument("pane"); s.set_defaults(fn=cmd_scre
 s = sub.add_parser("send"); s.add_argument("pane"); s.add_argument("text", nargs="+"); s.set_defaults(fn=cmd_send)
 s = sub.add_parser("answer"); s.add_argument("pane"); s.add_argument("answer"); s.add_argument("--confirmed", action="store_true"); s.set_defaults(fn=cmd_answer)
 s = sub.add_parser("start"); s.add_argument("project"); s.add_argument("--model", default="opus"); s.add_argument("text", nargs="*"); s.set_defaults(fn=cmd_start)
+s = sub.add_parser("close"); s.add_argument("pane"); s.add_argument("--confirmed", action="store_true"); s.set_defaults(fn=cmd_close)
 args = p.parse_args()
 args.fn(args)
