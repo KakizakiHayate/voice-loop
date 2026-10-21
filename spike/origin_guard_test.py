@@ -10,6 +10,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from origin_guard import problem
 
+os.environ["VL_HERMES_KEY"] = "k1"  # コンテナからの接続に要る鍵（試験用の値）
+
 TS = "mini.example-tailnet.ts.net:8790"
 PASS = [
     {"host": "127.0.0.1:8790"},  # hubctl・curl・画面の読み込み（Origin なし）
@@ -20,6 +22,13 @@ PASS = [
     {"host": "127.0.0.1:8790", "x-forwarded-host": TS, "origin": f"https://{TS}"},  # Host を書き換える場合
     {"host": "MINI.example-tailnet.ts.net:8790", "origin": f"https://{TS}"},  # 大文字小文字
     {"host": "voice.home.arpa:8790", "origin": "http://voice.home.arpa:8790", "_env": "voice.home.arpa"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/sessions"},  # コンテナ（Hermes）の hubctl、鍵つき
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/read"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/screen"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/send", "_method": "POST"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/answer", "_method": "POST"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/spawn", "_method": "POST"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/close", "_method": "POST"},
 ]
 BLOCK = [
     {"host": "127.0.0.1:8790", "origin": "https://evil.example"},  # 別のサイトのページ
@@ -37,12 +46,22 @@ BLOCK = [
     {"host": ""},  # Host なし
     {"host": "127.0.0.1:8790", "origin": "http://[::1"},  # 読めない形
     {"host": "127.0.0.1:8790", "x-forwarded-host": "evil.example", "origin": "https://other.example"},
+    {"host": "host.docker.internal:8790", "_path": "/api/hub/sessions"},  # コンテナから鍵なし
+    {"host": "host.docker.internal:8790", "x-vl-key": "wrong", "_path": "/api/hub/send", "_method": "POST"},  # 鍵違い
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/start", "_method": "POST"},  # hubctl の口の外
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/sessions", "_method": "POST"},  # 口は合っていても方法が違う
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/agents"},  # 画面用の API
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/answer", "_method": "POST"},
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/"},  # 画面
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/ws", "_method": ""},  # WebSocket
+    {"host": "host.docker.internal:8790", "x-vl-key": "k1", "_path": "/api/hub/sessions", "origin": "http://host.docker.internal:8790"},  # コンテナ経由のブラウザ
+    {"host": "host.docker.internal.evil.example:8790", "_path": "/api/hub/sessions"},
 ]
 
 
 def check(case: dict) -> str | None:
     os.environ["VL_ALLOWED_HOSTS"] = case.get("_env", "")
-    return problem({k: v for k, v in case.items() if not k.startswith("_")})
+    return problem({k: v for k, v in case.items() if not k.startswith("_")}, case.get("_method", "GET"), case.get("_path", "/"))
 
 
 bad = [f"通すはずが断った: {c} → {check(c)}" for c in PASS if check(c)]

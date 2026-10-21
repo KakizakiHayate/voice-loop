@@ -105,7 +105,32 @@ def scaffold(uv: str) -> list[str]:
     guard.chmod(0o755)
     if hub_settings(hub / ".claude/settings.json"):
         made.append(f"ハブの許可ルール {hub / '.claude/settings.json'}")
+    # Hermes をハブにするときの指示文・道具・鍵。コンテナに /opt/voice-loop として読み取り専用で見せる（README「Hermes をハブにする」）
+    hermes = CONFIG / "hermes"
+    hermes.mkdir(parents=True, exist_ok=True)
+    if (hermes / "AGENTS.md").exists() and not (hermes / "hub.md").exists():  # 以前の名前。AGENTS.md だと Hermes が会話の始まりに一度だけ読んでしまう
+        (hermes / "AGENTS.md").rename(hermes / "hub.md")
+    if not (hermes / "hub.md").exists():
+        shutil.copy(ROOT / "templates/hermes/hub.md", hermes / "hub.md")
+        made.append(f"Hermes への指示文 {hermes / 'hub.md'}")
+    shutil.copy(ROOT / "hubctl", hermes / "hubctl")  # コンテナからは本体のフォルダが見えないので、毎回写す（ハブと同じ道具）
+    (hermes / "hubctl").chmod(0o755)
+    for stale in ("hubread",):  # 以前の読むだけの道具
+        (hermes / stale).unlink(missing_ok=True)
+    key = _config_value(env, "VL_HERMES_KEY")
+    key_file = hermes / "hub_key"  # コンテナからの接続に付ける鍵。Hermes の API サーバーの鍵と同じ値
+    if key and (not key_file.exists() or key_file.read_text().strip() != key):
+        key_file.write_text(key + "\n")
+    key_file.chmod(0o600) if key_file.exists() else None
     return made
+
+
+def _config_value(env: Path, name: str) -> str:
+    """config.env の name= の値（行頭の # は無効）。"""
+    for line in env.read_text().splitlines() if env.exists() else []:
+        if line.startswith(name + "="):
+            return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 
 def hub_settings(path: Path) -> bool:
@@ -262,7 +287,9 @@ def cmd_start(restart: bool = False) -> int:
             print(f"  - {m}")
     print()
     print_checks(api("/api/doctor", timeout=60))
-    print(f"\n設定: {CONFIG / 'config.env'}\nハブへの指示文: {CONFIG / 'hub/CLAUDE.md'}（書き換えてかまいません）")
+    brain = _config_value(CONFIG / "config.env", "VL_HUB").lower()
+    guide = CONFIG / ("hermes/hub.md" if brain == "hermes" else "hub/CLAUDE.md")
+    print(f"\n設定: {CONFIG / 'config.env'}\nハブへの指示文: {guide}（書き換えてかまいません）" + ("\nハブの頭: Hermes（VL_HUB=hermes）" if brain == "hermes" else ""))
     return 0  # 手でやることが残っていても、起動そのものは済んでいる（herdr の記録を「失敗」にしない）
 
 

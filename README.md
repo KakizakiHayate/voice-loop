@@ -167,6 +167,7 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 - `tailscale funnel` でインターネットに公開しないでください。
 - ブラウザで開いたほかのサイトからの接続は、本体が断ります。接続元（Origin）と宛先の名前（Host）を確かめています。断ったときは、ログに `[guard]` で始まる行が残ります。
 - この Mac の名前と Tailscale の名前（〜.ts.net）以外で画面を開くときは、`config.env` の `VL_ALLOWED_HOSTS` にその名前を書きます。
+- Docker のコンテナからは `host.docker.internal` という名前で届きます。そこからは、Hermes の `hubctl` が使う `/api/hub/…` の口だけを、鍵（`hub_key`。Hermes の API サーバーの鍵と同じ値）が付いているときに通します。画面を開く・WebSocket・画面用の API は断ります。
 
 ## 命令
 
@@ -208,11 +209,93 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 - セッションを閉じるのは、あなたが頼み、許可したときだけです。どのセッションを閉じるかをプロジェクト名で声で伝え、あなたの次の発言が「はい」「お願い」などのはっきりした許可のときに閉じます。本体もハブの記録でこの順序と言葉を確かめ、満たさなければ閉じません。閉じるとその画面が消えます（タブにほかの画面が無ければタブも。会話の記録は残ります）。
 - 自分ではファイルを書かず、`./hubctl` 以外のコマンドも実行しません。
 
+## Hermes をハブにする（試験中）
+
+[Hermes Agent](https://hermes-agent.nousresearch.com/)（Nous Research の自律エージェント）を、ハブの頭にできます。`config.env` で `VL_HUB=hermes` にすると、herdr の中の Claude Code の代わりに、Docker の中の Hermes がハブになります。読む・送る・承認に答える・立てる・閉じるの決まりは同じで、守り（止まっている相手には送らない、承認は見たあとのユーザーの発言でしか答えない、取り消しにくい操作は聞き返す、閉じるのははっきりした許可の次の発言だけ、通知への応答中は操作しない）は本体の側にあるので、頭を替えても変わりません。
+
+Claude Code のハブと違うのは、Hermes が自分の記憶とスキルを持ち、直されたことを自分で書き残そうとする点です。スキルの書き込みは承認してから採用する設定にします（下の「使い方」）。
+
+```
+ブラウザ → 本体 → Hermes の API サーバー（Docker の中、同じ会話を続ける）
+                       └→ hubctl → 本体の /api/hub/…（host.docker.internal 経由、鍵つき）→ herdr の各セッション
+```
+
+`VL_HUB` を書かなければ、これまでどおり Claude Code がハブで、Hermes は話し相手の 1 人として一覧に出るだけです（`VL_HERMES_KEY` を書いたとき）。
+
+### 用意
+
+Hermes は公式の Docker イメージで動かします（Docker を動かすものが要ります）。設定は `~/.hermes` に残ります。
+
+```sh
+mkdir -p ~/.hermes
+docker pull nousresearch/hermes-agent:latest
+# 作業フォルダ（指示文の置き場）、スキルの書き込みは承認してから、API サーバーの鍵
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set terminal.cwd /opt/voice-loop
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set skills.write_approval true
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_ENABLED true
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_HOST 0.0.0.0
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_KEY "$(openssl rand -hex 32)"
+```
+
+モデルと認証は、対話の設定で選びます（Anthropic の API キー、Nous Portal など。Claude の個人プランの OAuth は使えません）。
+
+```sh
+docker run -it --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent model
+```
+
+`config.env` に、同じ鍵と、ハブの頭を書きます（鍵は `~/.hermes/.env` の `API_SERVER_KEY` と同じ値）。書いたら `restart` します。`start` か `restart` で、設定フォルダの `hermes/` に指示文 `hub.md`、道具 `hubctl`、鍵 `hub_key`（コンテナからの接続に付ける。同じ値）が置かれます。
+
+```
+VL_HERMES_KEY=（同じ鍵）
+VL_HUB=hermes
+```
+
+コンテナを常駐させます。設定フォルダの `hermes/` を `/opt/voice-loop` として読み取り専用で見せ、API サーバーはこの Mac の上からだけ使えるようにします。
+
+```sh
+docker run -d --name hermes --restart unless-stopped \
+  -v ~/.hermes:/opt/data \
+  -v ~/.config/herdr/plugins/config/u-space.voice-loop/hermes:/opt/voice-loop:ro \
+  -p 127.0.0.1:8642:8642 \
+  nousresearch/hermes-agent gateway run
+```
+
+話し相手の一覧の先頭に「ハブ（Hermes）｜全セッションを統括」が出ます。`doctor` の「ハブ」の項目が Hermes の確認に変わります。hub フォルダの Claude Code は立てません（残っていれば、ただのセッションとして一覧に出ます）。
+
+### 使い方と、スキルの確かめ方
+
+- 使い方はハブと同じです。気に入らなければ声で直します（「予定は要らない」「件数から言って」など）。会話は `VL_HERMES_SESSION`（既定 `voice-loop`）の名前で続くので、直したことは次の返事に効きます
+- 指示文（`hermes/hub.md`）は、本体が発言のたびに読んで Hermes に渡します。書き換えは次の発言から効き、会話はそのまま続きます（`AGENTS.md` という名前にしないこと。Hermes はその名前のファイルを会話の始まりに一度だけ読み、以後は古いまま使い続けます。2026-10-21 に確認）
+- Hermes がスキルを書こうとすると、承認待ちになります（`skills.write_approval`）。確かめて採用します。`~/.hermes/skills` を git に入れておくと、何がいつ変わったかが残ります
+
+```sh
+docker exec -it hermes hermes   # 対話の画面で
+/skills pending                  # 保留中のスキルの書き込み
+/skills diff <id>                # 差分
+/skills approve <id>             # 採用（reject で捨てる）
+```
+
+- 一問一答（`hermes chat -q`）では Hermes はスキルを書きません（公式ドキュメント: one-shot では `skill_manage` を外す）。本体が API サーバー経由で同じ会話を続けているのはそのためです
+- Hermes は `hubctl` が返す内容（各セッションの記録の引用）を読みます。そこに紛れた指示には従わないよう指示文に書いてありますが、確実ではありません。乗せられても、本体の守りの外（承認を勝手に通す、閉じる、ユーザーの知らない連鎖）には出られない作りです。起きうるのは「変な報告」と「変な指示文を送る」までで、後者は送られたセッションの許可の確認で止まります
+
+### Hermes との会話をターミナルで見る（2026-10-21 に確かめた範囲）
+
+voice-loop が API で続けている会話は、Hermes 側ではふつうのセッション（ID は `VL_HERMES_SESSION` の値）として残る。目で見たいときは、任意のターミナルで次を打つと、その時点までの履歴が開く。
+
+```
+docker exec -it hermes hermes --resume voice-loop
+```
+
+- 生中継ではない。繋いだあとに voice-loop から送った発言は画面に流れてこない。見直すときは `/quit` で閉じて繋ぎ直す
+- `hermes --tui --resume` は、他の端末が開いている会話には繋げない（0.22.2 の Docker 版で「この build では使えない」と出る）
+- ターミナルを閉じるときは必ず `/quit`。ウィンドウを消すだけだと、コンテナの中に CLI が残り、そのセッションが「別の端末で開いている」扱いのまま繋ぎ直せなくなる（voice-loop からの発言は影響なく通る）。残ったときは `docker exec hermes sh -c 'pkill -f "resume voice-loop"'`
+- Web ダッシュボード（`HERMES_DASHBOARD=1` と `-p 127.0.0.1:9119:9119` を付けてコンテナを作り直す）は未検証
+
 ## 更新と、外し方
 
 herdr に更新の命令は無いので、入れ直します。設定フォルダはそのまま残ります。本体の場所や版が変わっていれば、次に herdr を起動したとき（または `start` のとき）に、常駐サービスが新しい本体に切り替わります。
 
-ハブへの指示文（設定フォルダの `hub/CLAUDE.md`）は、更新しても上書きされません。新しい版でひな形（`templates/hub/CLAUDE.md`）が変わったときは、見比べて取り込み、ハブのタブを閉じて `start` してください。
+ハブへの指示文（設定フォルダの `hub/CLAUDE.md`。Hermes なら `hermes/hub.md`）は、更新しても上書きされません。新しい版でひな形（`templates/hub/CLAUDE.md`・`templates/hermes/hub.md`）が変わったときは、見比べて取り込み、ハブのタブを閉じて `start` してください（Hermes は次の発言から読み直します）。
 
 外すときは、`uninstall` で常駐の登録を外してから、herdr でプラグインを外します。設定フォルダは残るので、要らなければ手で消します。
 
