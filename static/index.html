@@ -347,7 +347,7 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) { co
 window.addEventListener('online', () => connect());
 setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) { loadAgents(); ensureSpeakers(); } }, 20000);
 // 一覧と声を読んでからつなぐ。届かないときは5秒で見切って案内を出し、つなぎに行く（つながりしだい catchUp で取り直す）
-Promise.race([Promise.allSettled([loadAgents(), loadSpeakers()]).then(() => true), new Promise(r => setTimeout(() => r(false), 5000))])
+Promise.race([Promise.allSettled([loadAgents(), ensureSpeakers()]).then(() => true), new Promise(r => setTimeout(() => r(false), 5000))])
   .then(answered => { if (!answered) setStatus(UNREACHABLE); connect(); });
 </script>
 </body>
