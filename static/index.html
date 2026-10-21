@@ -133,8 +133,9 @@ let shownPane = null; // いま履歴を出している相手
 let setupChecked = false; // 開いてから一度は、準備の残りを確かめたか
 function applyTarget() {
   const ok = !!$('agent').value;
-  $('talk').disabled = $('send').disabled = $('typed').disabled = !ok;
-  if (!ok) setStatus('話し相手を選んでください');
+  $('typed').disabled = !ok;
+  $('talk').disabled = $('send').disabled = !ok || !linked(); // Mac に届かない間は送れない（打ちかけの文は残る）
+  if (!ok && linked()) setStatus('話し相手を選んでください');
 }
 async function loadAgents() {
   let list; try { list = await (await fetch('/api/agents')).json(); } catch { return; }
@@ -175,7 +176,7 @@ async function showSetup(seq) {
   sys(`準備があと ${todo.length} つ残っています。`);
   todo.forEach((c, i) => sys(`${i + 1}. ${c.name}: ${c.todo}`));
 }
-$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus('準備できました'); loadThread(); };
+$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); };
 $('hubStart').onclick = async () => {
   $('hubStart').disabled = true; setStatus('ハブを起動しています…（20秒ほど）');
   try {
@@ -191,6 +192,7 @@ async function loadSpeakers() {
   for (const s of sp) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; sel.appendChild(o); }
   const saved = localStorage.getItem('vl.speaker'), def = sp.find(s => s.default);
   if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved; else if (def) sel.value = def.id; // 覚えている声が無い（エンジンを替えた直後など）なら既定の声
+  hello(); // つながったあとで一覧が届いたときも、選んでいる声をサーバーに知らせる
 }
 const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value })); } catch {} }; // ハブからの報告を、選んでいる声で届けてもらう
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
@@ -243,11 +245,23 @@ function stopPlayback() { gen++; queue = []; playing = false; accepting = false;
 function finishSpeaking(msg = '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
 
 // ---------- 通信 ----------
+// Mac に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す
+const UNREACHABLE = 'Mac に届きません。接続を確かめてください';
+let away = false, retry = null;
 function connect() {
+  clearTimeout(retry);
+  if (ws && ws.readyState <= 1) return; // つなぎに行っている途中か、もうつながっている
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { $('conn').classList.add('on'); setStatus('準備できました'); applyTarget(); hello(); clog('connected ' + navigator.userAgent); };
-  ws.onclose = () => { $('conn').classList.remove('on'); setStatus('切断。再接続します…'); setTimeout(connect, 2000); };
+  const sock = ws, giveUp = setTimeout(() => { if (sock.readyState === 0) sock.close(); }, 5000); // 通信が止まって待たされるときは見切る
+  ws.onopen = () => {
+    clearTimeout(giveUp); $('conn').classList.add('on'); setStatus('準備できました'); applyTarget(); hello(); clog('connected ' + navigator.userAgent);
+    if (away) { away = false; catchUp(); }
+  };
+  ws.onclose = () => {
+    clearTimeout(giveUp); if (sock !== ws) return;
+    $('conn').classList.remove('on'); away = true; applyTarget(); setStatus(UNREACHABLE); retry = setTimeout(connect, 2000);
+  };
   ws.onmessage = async ev => {
     if (ev.data instanceof ArrayBuffer) { enqueue(ev.data); return; }
     const m = JSON.parse(ev.data);
@@ -265,6 +279,13 @@ function connect() {
     else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
     else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
   };
+}
+function linked() { return !!ws && ws.readyState === 1; }
+// 届かなかった間に変わったもの（一覧・声・会話）を取り直す
+async function catchUp() {
+  if (!$('speaker').options.length) await loadSpeakers().catch(() => {});
+  agentsSig = ''; shownPane = null; // 一覧と履歴を描き直させる
+  await loadAgents();
 }
 function sendTurnStart() { stopPlayback(); serverDone = true; }
 
@@ -288,6 +309,7 @@ async function startRec() {
     if (blob.size < 2000) { setStatus('短すぎました'); return; }
     sendTurnStart();
     if (!$('agent').value) { setStatus('話し相手を選んでください'); return; }
+    if (!linked()) { setStatus(UNREACHABLE); return; } // 話しているあいだに届かなくなった
     ws.send(JSON.stringify({ type: 'turn', pane: $('agent').value, key: curKey(), speaker: $('speaker').value, filename: 'rec.' + ext }));
     ws.send(await blob.arrayBuffer());
     setStatus('聞き取り中…');
@@ -298,9 +320,9 @@ async function startRec() {
 function stopRec() { if (rec && rec.state !== 'inactive') rec.stop(); $('talk').classList.remove('rec'); $('talk').textContent = 'タップして話す'; }
 
 $('talk').onclick = () => { if (!$('agent').value) return; if (rec && rec.state === 'recording') stopRec(); else startRec().catch(e => { setStatus('マイクが使えません: ' + e.message); clog('mic failed: ' + e.name + ' ' + e.message); }); };
-$('stop').onclick = () => { ws.send(JSON.stringify({ type: 'stop' })); stopPlayback(); setStatus('止めました'); };
+$('stop').onclick = () => { if (linked()) ws.send(JSON.stringify({ type: 'stop' })); stopPlayback(); setStatus('止めました'); };
 $('typedForm').onsubmit = e => {
-  e.preventDefault(); const t = $('typed').value.trim(); if (!t || !$('agent').value) return;
+  e.preventDefault(); const t = $('typed').value.trim(); if (!t || !$('agent').value || !linked()) return; // 届かない間は打った文をそのまま残す
   sendTurnStart(); prime();
   $('typed').value = ''; bubble('me', t, 'pending'); localPush('me', t);
   ws.send(JSON.stringify({ type: 'text', text: t, pane: $('agent').value, key: curKey(), speaker: $('speaker').value }));
@@ -309,9 +331,14 @@ $('typedForm').onsubmit = e => {
 
 // ---------- 起動 ----------
 setSession('playback');
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
+applyTarget(); // つながるまでは話す・送るを押せないようにしておく
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // Mac に届かなくても画面は開けるように（sw.js）
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
+window.addEventListener('online', () => connect());
 setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) loadAgents(); }, 20000);
-Promise.all([loadAgents(), loadSpeakers()]).then(connect);
+// 一覧と声を読んでからつなぐ。届かないときは5秒で見切って案内を出し、つなぎに行く（つながりしだい catchUp で取り直す）
+Promise.race([Promise.allSettled([loadAgents(), loadSpeakers()]).then(() => true), new Promise(r => setTimeout(() => r(false), 5000))])
+  .then(answered => { if (!answered) setStatus(UNREACHABLE); connect(); });
 </script>
 </body>
 </html>

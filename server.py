@@ -583,6 +583,12 @@ def index():
     return FileResponse(HERE / "static" / "index.html", headers={"Cache-Control": "no-cache"})
 
 
+@app.get("/sw.js")
+def service_worker():
+    """画面の部品を手元に取っておく仕組み。画面全体を受け持たせるため、/static ではなくここから配る。"""
+    return FileResponse(HERE / "static" / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+
 @app.get("/api/agents")
 def api_agents():
     agents = sorted(list_agents(), key=lambda a: not a["hub"])  # ハブを先頭に
