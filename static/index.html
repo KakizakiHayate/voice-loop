@@ -248,8 +248,9 @@ function stopPlayback() { gen++; queue = []; playing = false; accepting = false;
 function finishSpeaking(msg = '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
 
 // ---------- 通信 ----------
-// Mac に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す
-const UNREACHABLE = 'Mac に届きません。接続を確かめてください';
+// 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。
+// 案内は届かない先を名指ししない（本体が Mac とは限らない）
+const UNREACHABLE = '接続できません。接続を確かめてください';
 let away = false, retry = null;
 function connect() {
   clearTimeout(retry);
