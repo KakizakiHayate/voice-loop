@@ -90,15 +90,19 @@ check("聞いたときの返答に、閉じるかの問いが無ければ閉じ�
 asked(reply="テストのセッションを閉じていいですか。")
 say("はい")
 check("聞いたときの返答に、プロジェクト名が無ければ閉じない", close(confirmed=True), ("not_asked", []))
-asked(reply="道具は閉じませんでした。閉じようとした相手は proj の「テスト」で、開いたままです。")
-say("はい")
-check("聞いたときの返答が、閉じなかった報告（問いでない）なら閉じない", close(confirmed=True), ("not_asked", []))
+for reply in ("道具は閉じませんでした。閉じようとした相手は proj の「テスト」で、開いたままです。",
+              "proj のセッションを閉じると何が起きるか説明しましょうか。",  # Codex 第2回の再現
+              "proj の「テスト」を閉じました。ほかに閉じるものはありますか？"):
+    asked(reply=reply)
+    say("はい")
+    check(f"聞いたときの返答が「{reply}」（閉じていいかの問いでない）なら閉じない", close(confirmed=True), ("not_asked", []))
 for reply in ("proj の「テスト」を閉じてもいいですか？", "proj のテストのセッション、**閉じていい？**", "閉じるのは proj の「テスト」です。閉じますか",
               "proj の「テスト」を閉じていいか、もう一度だけ聞かせてください。"):  # 最後は 2026-10-21 の通しで本物のハブが言った形
     asked(reply=reply)
     say("はい")
     check(f"聞いたときの返答「{reply}」は問いとして読む", close(confirmed=True), ("ok", ["w9:p1"]))
-for answer in ("README を見せて", "閉じないで", "いいえ", "いや、やめておいて", "ええと、どうしようかな", "うーん", "待って", "はい、でもまだ残して"):
+for answer in ("README を見せて", "閉じないで", "いいえ", "いや、やめておいて", "ええと、どうしようかな", "うーん", "待って", "はい、でもまだ残して",
+               "ううん", "うん、閉じるのは後でお願い"):  # 最後の2つは Codex 第2回の再現
     asked()
     say(answer)
     check(f"答えが「{answer}」なら閉じない", close(confirmed=True), ("not_yes", []))
