@@ -98,6 +98,13 @@ _load_readings()
 READING_RE = re.compile(r"(?<![A-Za-z])(" + "|".join(map(re.escape, sorted(READINGS, key=len, reverse=True))) + r")(?![A-Za-z])", re.I)
 PROJECTS = Path.home() / ".claude" / "projects"
 HUB_DIR = CONFIG_DIR / "hub"  # ここを作業ディレクトリにしている Claude Code セッションが「ハブ」。中の指示文は利用者が書き換えてよい
+# Hermes を話し相手に足すとき（README「Hermes を話し相手にする」）。鍵を書くと一覧に出る。コンテナの中の API サーバーに送り、
+# 会話は HERMES_SESSION の名前で続く（直したことが積み重なる）。Hermes から本体へは host.docker.internal 経由で読む 2 本だけ（origin_guard）
+HERMES_URL = os.environ.get("VL_HERMES_URL", "http://127.0.0.1:8642").rstrip("/")
+HERMES_KEY = os.environ.get("VL_HERMES_KEY", "")
+HERMES_SESSION = os.environ.get("VL_HERMES_SESSION", "voice-loop")
+HERMES_PANE = "hermes"  # 画面が話し相手を指す鍵。herdr の pane ではない
+HERMES_DIR = CONFIG_DIR / "hermes"  # Hermes への指示文（AGENTS.md）と hubread。コンテナに /opt/voice-loop として読み取り専用で見せる
 HUB_MODEL = os.environ.get("VL_HUB_MODEL", "sonnet")
 HUB_WORKSPACE = os.environ.get("VL_HUB_WORKSPACE", "")  # ハブのタブを作る herdr ワークスペースの名前。空なら先頭のワークスペース
 HUB_SETTLE = float(os.environ.get("VL_HUB_SETTLE", "30"))  # 起動時、herdr 自身のセッション復元が落ち着くのを待つ秒数
@@ -589,10 +596,42 @@ def service_worker():
     return FileResponse(HERE / "static" / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
+def hermes_agent() -> dict:
+    """話し相手の一覧に載せる Hermes の項目。herdr のセッションではないので、pane も key も固定の名前。"""
+    return {"pane": HERMES_PANE, "key": HERMES_PANE, "title": "Hermes", "cwd": "", "kind": "hermes", "session": HERMES_SESSION,
+            "status": "idle", "name": "hermes", "hub": False, "hermes": True}
+
+
+def ask_hermes(text: str) -> str:
+    """Hermes の API サーバー（OpenAI 互換）に送り、返事を待つ。X-Hermes-Session-Id で同じ会話を続ける。"""
+    req = urllib.request.Request(
+        f"{HERMES_URL}/v1/chat/completions",
+        data=json.dumps({"model": "hermes-agent", "messages": [{"role": "user", "content": text}], "stream": False}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {HERMES_KEY}", "X-Hermes-Session-Id": HERMES_SESSION},
+        method="POST")
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=600) as r:
+            body = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Hermes が {e.code} を返しました: {e.read().decode('utf-8', 'replace')[:200]}") from None
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Hermes に接続できません（{e.reason}）。コンテナが動いているか確認してください") from None
+    choice = (body.get("choices") or [{}])[0]
+    content = (choice.get("message") or {}).get("content") or ""
+    if isinstance(content, list):  # 形が配列のときは文字の部分だけ拾う
+        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    print(f"[hermes] {time.monotonic() - t0:.1f}秒（{len(text)}字 → {len(content)}字、finish={choice.get('finish_reason')}）", flush=True)
+    return content.strip()
+
+
 @app.get("/api/agents")
 def api_agents():
     agents = sorted(list_agents(), key=lambda a: not a["hub"])  # ハブを先頭に
-    return JSONResponse([{**a, "key": agent_key(a)} for a in agents])
+    out = [{**a, "key": agent_key(a)} for a in agents]
+    if HERMES_KEY:
+        out.append(hermes_agent())
+    return JSONResponse(out)
 
 
 @app.get("/api/history")
@@ -768,6 +807,15 @@ def doctor():
             add("ハブ", False, stuck["detail"])
         else:
             add("ハブ", any(a["hub"] for a in list_agents()), "プラグインの start を実行するか、画面の「ハブを起動」を押してください")
+    if HERMES_KEY:
+        try:
+            urllib.request.urlopen(f"{HERMES_URL}/health", timeout=5).read()
+            hermes_up = True
+        except Exception:
+            hermes_up = False
+        add("Hermes（話し相手）", hermes_up, f"Hermes の API サーバーが {HERMES_URL} で応答しません。コンテナを起動してください（README「Hermes を話し相手にする」）", optional=True)
+        add("Hermes への指示文", (HERMES_DIR / "AGENTS.md").is_file() and (HERMES_DIR / "hubread").is_file(),
+            "プラグインの start を実行してください（Hermes への指示文と hubread が置かれます）", optional=True)
     add("セッションを立てる場所", bool(PROJECTS_DIR and PROJECTS_DIR.is_dir()),
         "ハブに新しいセッションを立てさせるなら、config.env の VL_PROJECTS_DIR にプロジェクトの置き場所を書いてください", optional=True)
     return JSONResponse({"ok": all(c["ok"] or c["optional"] for c in checks), "checks": checks, "config_dir": str(CONFIG_DIR), "narrator": model})
@@ -1323,6 +1371,25 @@ async def ws(sock: WebSocket):
             await send(type="error", text=f"{type(e).__name__}: {e}"[:300])
 
     async def run_turn(text: str, pane: str, cancel: asyncio.Event, key: str | None):
+        if pane == HERMES_PANE:  # Hermes は herdr のセッションではなく、コンテナの中の API サーバー
+            if not HERMES_KEY:
+                await send(type="error", gone=True, text="Hermes は設定されていません（config.env の VL_HERMES_KEY）。選び直してください。")
+                return
+            await send(type="status", text="Hermes に送りました。考え中…")
+            async with pane_lock(HERMES_PANE):
+                try:
+                    reply = await asyncio.to_thread(ask_hermes, text)
+                except RuntimeError as e:
+                    await send(type="error", text=str(e)[:300])
+                    return
+            if cancel.is_set():
+                return
+            if not reply:
+                await send(type="error", text="Hermes の返事が空でした")
+                return
+            await send(type="reply", pane=pane, text=reply)
+            await speak_to([client], reply, cancel)
+            return
         agent = next((a for a in list_agents() if a["pane"] == pane), None)
         if not agent:
             await send(type="error", gone=True, text="話し相手のセッションが見つかりません。選び直してください。")

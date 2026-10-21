@@ -105,6 +105,14 @@ def scaffold(uv: str) -> list[str]:
     guard.chmod(0o755)
     if hub_settings(hub / ".claude/settings.json"):
         made.append(f"ハブの許可ルール {hub / '.claude/settings.json'}")
+    # Hermes を話し相手にするときの指示文と道具。コンテナに /opt/voice-loop として読み取り専用で見せる（README「Hermes を話し相手にする」）
+    hermes = CONFIG / "hermes"
+    hermes.mkdir(parents=True, exist_ok=True)
+    if not (hermes / "AGENTS.md").exists():
+        shutil.copy(ROOT / "templates/hermes/AGENTS.md", hermes / "AGENTS.md")
+        made.append(f"Hermes への指示文 {hermes / 'AGENTS.md'}")
+    shutil.copy(ROOT / "scripts/hubread", hermes / "hubread")  # コンテナからは本体のフォルダが見えないので、毎回写す
+    (hermes / "hubread").chmod(0o755)
     return made
 
 

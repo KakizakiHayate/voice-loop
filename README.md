@@ -167,6 +167,7 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 - `tailscale funnel` でインターネットに公開しないでください。
 - ブラウザで開いたほかのサイトからの接続は、本体が断ります。接続元（Origin）と宛先の名前（Host）を確かめています。断ったときは、ログに `[guard]` で始まる行が残ります。
 - この Mac の名前と Tailscale の名前（〜.ts.net）以外で画面を開くときは、`config.env` の `VL_ALLOWED_HOSTS` にその名前を書きます。
+- Docker のコンテナからは `host.docker.internal` という名前で届きます。そこからは、Hermes がセッションを読むための 2 本（`/api/hub/sessions` と `/api/hub/read`）だけを通し、指示を送る・承認に答える・セッションを立てる・画面を開くは断ります。
 
 ## 命令
 
@@ -207,6 +208,71 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 - 「今後は聞かずに許可」にあたる選択肢は選びません。フォルダの信頼の確認にも答えません。
 - セッションを閉じることはしません。立てられるのは同時に3つまでです。
 - 自分ではファイルを書かず、`./hubctl` 以外のコマンドも実行しません。
+
+## Hermes を話し相手にする（試験中）
+
+[Hermes Agent](https://hermes-agent.nousresearch.com/)（Nous Research の自律エージェント）を、話し相手の 1 人として足せます。Hermes の仕事は「全体どうなってる？」に答えることだけです。セッションを読む道具（`hubread`）しか持たず、指示を送る・承認に答える・セッションを立てることはできません（本体の見張りが、コンテナからの接続を読む 2 本に絞っています）。
+
+ハブと違い、Hermes への指示文（`hermes/AGENTS.md`）には仕事と道具しか書いてありません。話し方の決まりは、声で直したことを Hermes が自分のスキルとして書き残すかを見るために、わざと書いていません。ハブの `CLAUDE.md` にある決まりが答え合わせの正本です。
+
+```
+ブラウザ → 本体 → Hermes の API サーバー（Docker の中、同じ会話を続ける）
+                       └→ hubread → 本体の /api/hub/sessions・/api/hub/read（host.docker.internal 経由、読むだけ）
+```
+
+### 用意
+
+Hermes は公式の Docker イメージで動かします（Docker を動かすものが要ります）。設定は `~/.hermes` に残ります。
+
+```sh
+mkdir -p ~/.hermes
+docker pull nousresearch/hermes-agent:latest
+# 作業フォルダ（指示文の置き場）、スキルの書き込みは承認してから、API サーバーの鍵
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set terminal.cwd /opt/voice-loop
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set skills.write_approval true
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_ENABLED true
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_HOST 0.0.0.0
+docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_SERVER_KEY "$(openssl rand -hex 32)"
+```
+
+モデルと認証は、対話の設定で選びます（Anthropic の API キー、Nous Portal など。Claude Pro の OAuth は使えません）。
+
+```sh
+docker run -it --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent model
+```
+
+`config.env` に、同じ鍵を書きます（`~/.hermes/.env` の `API_SERVER_KEY` と同じ値）。書いたら `restart` します。`start` か `restart` で、設定フォルダに `hermes/AGENTS.md` と `hermes/hubread` が置かれます。
+
+```
+VL_HERMES_KEY=（同じ鍵）
+```
+
+コンテナを常駐させます。設定フォルダの `hermes/` を `/opt/voice-loop` として読み取り専用で見せ、API サーバーはこの Mac の上からだけ使えるようにします。
+
+```sh
+docker run -d --name hermes --restart unless-stopped \
+  -v ~/.hermes:/opt/data \
+  -v ~/.config/herdr/plugins/config/u-space.voice-loop/hermes:/opt/voice-loop:ro \
+  -p 127.0.0.1:8642:8642 \
+  nousresearch/hermes-agent gateway run
+```
+
+話し相手の一覧に「Hermes｜読むだけの話し相手（試験中）」が出ます。`doctor` に Hermes の項目が足されます。
+
+### 使い方と、スキルの確かめ方
+
+- 声で「全体どうなってる？」と聞き、気に入らなければ声で直します（「予定は要らない」「件数から言って」など）。会話は `VL_HERMES_SESSION`（既定 `voice-loop`）の名前で続くので、直したことは次の返事に効きます
+- Hermes がスキルを書こうとすると、承認待ちになります（`skills.write_approval`）。確かめて採用します。`~/.hermes/skills` を git に入れておくと、何がいつ変わったかが残ります
+
+```sh
+docker exec -it hermes hermes   # 対話の画面で
+/skills pending                  # 保留中のスキルの書き込み
+/skills diff <id>                # 差分
+/skills approve <id>             # 採用（reject で捨てる）
+```
+
+- 一問一答（`hermes chat -q`）では Hermes はスキルを書きません（公式ドキュメント: one-shot では `skill_manage` を外す）。本体が API サーバー経由で同じ会話を続けているのはそのためです
+- Hermes は `hubread` が返す内容を読みます。そこに紛れた指示には従わないよう指示文に書いてありますが、確実ではありません。Hermes に渡しているのは読む道具だけなので、乗せられても起きるのは「変な報告」までです
 
 ## 更新と、外し方
 
