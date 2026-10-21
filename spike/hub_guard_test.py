@@ -15,6 +15,7 @@ PASS = [
     "./hubctl read w13:p2 -n 1 --full",
     "./hubctl screen w13:p2",
     "./hubctl answer w13:p2 yes --confirmed",
+    "./hubctl close w13:p2 --confirmed",
     "./hubctl start blog --model=opus 'README を直して'",
     './hubctl send w1:p2 "PR #135 をレビューして (優先度: 高)。A & B; 50 > 10 | メモ"',
     "./hubctl send w1:p2 'it'\"'\"'s $100 `ok` (fine) & more; #1'",
