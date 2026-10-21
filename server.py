@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -35,6 +36,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "scripts"))
+from origin_guard import SameOriginOnly  # noqa: E402  接続元の確かめ
+
 PLUGIN_ID = "u-space.voice-loop"  # herdr-plugin.toml の id と同じ
 # 端末ごとの設定と状態は、本体のフォルダ（herdr が入れ直すと置き換わる）の外に置く。場所は herdr がプラグインに用意するフォルダ
 CONFIG_DIR = Path(os.environ.get("VL_CONFIG_DIR") or Path.home() / ".config/herdr/plugins/config" / PLUGIN_ID)
@@ -118,6 +122,7 @@ async def lifespan(_app):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(SameOriginOnly)  # ブラウザで開いた別のサイトからの接続を断る
 
 
 def hlog(msg: str, flush: bool = True):
@@ -1248,11 +1253,6 @@ async def ws(sock: WebSocket):
                     if current:
                         current.cancel()
                     await send(type="stopped")
-                    continue
-                if d["type"] == "answer":  # 承認待ちへのキー送信
-                    keys = {"yes": "Enter", "no": "Escape"}.get(d["answer"], d["answer"])
-                    await asyncio.to_thread(herdr, "agent", "send-keys", d["pane"], keys)
-                    await send(type="status", text=f"送りました: {keys}")
                     continue
                 if d["type"] == "clientlog":  # 端末側（特にスマホ）の再生まわりの出来事を残す
                     print(f"[client] {str(d.get('msg'))[:300]}", flush=True)

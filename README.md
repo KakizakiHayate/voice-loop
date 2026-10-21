@@ -36,8 +36,16 @@ macOS 専用です。次のものが要ります。足りないものは、あ�
 
 ### herdr と Claude Code
 
+voice-loop は、herdr と Claude Code が動いている Mac に入れます。セッションの記録と herdr を、同じ Mac の上で読むためです。Claude Code はログインを済ませておき、herdr の Claude 連携を入れます。
+
 ```sh
 herdr integration install claude
+```
+
+### uv
+
+```sh
+brew install uv
 ```
 
 ### 聞き取り（whisper）
@@ -54,11 +62,13 @@ cd ~/.local/state/whisper-work && whisper-server \
   --host 127.0.0.1 --port 8080 --inference-path /v1/audio/transcriptions -l ja --convert
 ```
 
+最後の `whisper-server` は、止めるまで動き続けます。別のタブで実行して、開いたままにしてください。
+
 `--convert` は、ブラウザの録音を ffmpeg で変換するために要ります。変換は作業フォルダに一時ファイルを書くので、書き込めるフォルダで起動してください。launchd に登録して常駐させるときは、`WorkingDirectory` を忘れると変換に失敗します。
 
 ### 声（AivisSpeech）
 
-`127.0.0.1:10101` で AivisSpeech Engine を動かします。Docker の例です（イメージは約3.7GB）。
+`127.0.0.1:10101` で AivisSpeech Engine を動かします。Docker の例です（イメージは約3.7GB）。Docker を動かすもの（OrbStack や Docker Desktop）が要ります。OrbStack なら `brew install --cask orbstack` で入れ、一度アプリを開いて初期設定を済ませます。
 
 ```sh
 docker run -d --name aivis --restart unless-stopped \
@@ -83,6 +93,20 @@ herdr plugin action invoke u-space.voice-loop.start
 
 `start` は、設定フォルダにひな形を置き、常駐サービスを登録して上げ、ハブを立て、最後に点検の結果を出します。手でやることが残っていれば、番号つきで並びます。
 
+`herdr plugin action invoke` は、受け付けたことを JSON で返すだけです。結果は次の命令で読みます。1行目が `start running` なら、まだ準備の途中です。初回は必要なものの取得で数分かかることがあるので、少し待って打ち直してください。
+
+```sh
+herdr plugin log list --plugin u-space.voice-loop | python3 -c '
+import json, sys
+logs = json.load(sys.stdin)["result"]["logs"]
+if not logs: sys.exit("記録なし")
+last = logs[-1]
+print(last["action_id"], last["status"])
+print(last.get("stdout") or "", last.get("stderr") or "")'
+```
+
+「記録なし」は、プラグインが入っていないときにも出ます。入っているかどうかは `herdr plugin list` で確かめます。
+
 ## 初回に、手で答えること
 
 ハブを初めて立てると、herdr の `hub` タブで Claude Code が「このフォルダを信頼しますか」と聞いて止まります。**↓ で「Yes, I trust this folder」を選び、Enter を押してください。** 初めの選択は「No, exit」なので、Enter だけでは進みません。
@@ -106,6 +130,15 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 ```
 
 話し相手を選び、「タップして話す」を押して話し、もう一度押して送ります。初めて開いたときの話し相手はハブです。準備が残っていると、画面にも同じ案内が出ます。
+
+## 接続できる範囲
+
+本体は `127.0.0.1` でだけ待ち受けます。使えるのは、この Mac の上のプログラムと、Tailscale Serve を通した tailnet の端末です。
+
+- この範囲の中からなら、パスワードなしでセッションへ指示を送れます。tailnet をほかの人と共有しているときは、Tailscale のアクセス制御で、この Mac の 8790 番を自分の端末だけに絞ってください。
+- `tailscale funnel` でインターネットに公開しないでください。
+- ブラウザで開いたほかのサイトからの接続は、本体が断ります。接続元（Origin）と宛先の名前（Host）を確かめています。断ったときは、ログに `[guard]` で始まる行が残ります。
+- この Mac の名前と Tailscale の名前（〜.ts.net）以外で画面を開くときは、`config.env` の `VL_ALLOWED_HOSTS` にその名前を書きます。
 
 ## 命令
 
@@ -160,3 +193,12 @@ herdr に更新の命令は無いので、入れ直します。設定フォル�
 - ほかの Mac への導入
 - GitHub からの `herdr plugin install`（手元のフォルダを `herdr plugin link` で登録する形だけ確認済み）
 - Mac を再起動したあとの復帰
+
+## ライセンス
+
+MIT です（`LICENSE`）。`static/vendor/` に同梱している次のライブラリは、それぞれのライセンスに従います。本文は同じフォルダにあります。
+
+| ライブラリ | ライセンス | 本文 |
+|---|---|---|
+| marked v12.0.2 | MIT | `static/vendor/marked.LICENSE.md` |
+| DOMPurify 3.1.6 | Apache-2.0 または MPL-2.0 | `static/vendor/purify.LICENSE` |
