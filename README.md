@@ -91,9 +91,9 @@ docker run -d --name voicevox --restart unless-stopped \
   -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
 ```
 
-設定フォルダの `config.env` に `VL_VOICE=voicevox` と書き、`restart` します。既定の声は春日部つむぎで、画面でほかの声を選べます。
+設定フォルダの `config.env` に `VL_VOICE=voicevox` と書き、`restart` します。既定の声は春日部つむぎで、画面でほかの声を選べます。`config.env` で `VL_DEFAULT_SPEAKER` を書いているなら、その行を消すか、VOICEVOX の声の ID に直してください。AivisSpeech の声の ID のままだと、点検が「既定の声」で知らせます。
 
-VOICEVOX の声は、キャラクターごとの利用規約に従って使います。作った音声を人に公開するときは、「VOICEVOX:春日部つむぎ」のようなクレジットの表記が要ります（[利用規約](https://voicevox.hiroshiba.jp/term/)）。
+VOICEVOX の[利用規約](https://voicevox.hiroshiba.jp/term/)では、使うときに VOICEVOX を使ったことがわかるクレジットの表記（「VOICEVOX:春日部つむぎ」など）が要ります。声ごとの規約にも従います。
 
 ### 語り手の認証
 

@@ -66,7 +66,8 @@ VOICE_ENGINES = {
 }
 VOICE = os.environ.get("VL_VOICE", "aivis").strip().lower()
 VOICE_NAME, _voice_url, _voice_speaker = VOICE_ENGINES.get(VOICE, VOICE_ENGINES["aivis"])  # 知らない名前なら AivisSpeech で動き、点検で知らせる
-TTS_URL = os.environ.get("VL_VOICE_URL") or os.environ.get("VL_AIVIS") or _voice_url  # VL_AIVIS は 0.2 までの名前
+# VL_AIVIS は 0.2 までの名前。名前のとおり AivisSpeech のときだけ効かせ、VOICEVOX に替えた人の呼び先を古い値で上書きしない
+TTS_URL = os.environ.get("VL_VOICE_URL") or (os.environ.get("VL_AIVIS") if VOICE_NAME == "AivisSpeech" else None) or _voice_url
 # 語り手（返答を話し言葉に直す軽いモデル）。既定は NARRATOR_MODEL。narrator_model というファイルに1行書けば、再起動なしで切り替わる
 #   名前に "/" が無い … Anthropic 直結。認証は `ant auth login` のプロフィール（~/.config/anthropic/）。API キー不要
 #   名前に "/" がある … Vercel AI Gateway（OpenAI 互換）。認証は gateway/ に紐づけた Vercel プロジェクトの OIDC トークン
@@ -841,7 +842,7 @@ async def speak_to(clients: list[Client], text: str, cancel: asyncio.Event):
     await each(lambda c: c.send(type="speaking"))  # これ以降の音声がこのターンのもの（止めた後に届く古い音声と区別する）
     n = 0
     async for sentence in narrate(text, cancel):
-        voice = {c: c.speaker or DEFAULT_SPEAKER for c in alive}
+        voice = {c: DEFAULT_SPEAKER if c.speaker is None else c.speaker for c in alive}  # VOICEVOX では 0 も声の ID
         wavs = {sp: await asyncio.to_thread(synth, sentence, sp) for sp in set(voice.values())}
         if cancel.is_set() or not alive:
             break
@@ -1256,7 +1257,7 @@ async def ws(sock: WebSocket):
             if msg.get("text") is not None:
                 d = json.loads(msg["text"])
                 if d["type"] == "hello":  # 画面が選んでいる声（ハブからの報告を、その声で届けるため）
-                    client.speaker = int(d["speaker"]) if d.get("speaker") else None
+                    client.speaker = None if d.get("speaker") in (None, "") else int(d["speaker"])
                     continue
                 if d["type"] == "stop":
                     cancel.set()
