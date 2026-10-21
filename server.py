@@ -1146,10 +1146,27 @@ async def hub_answer(body: dict):
 
 
 # ---------- 画面のボタンからの返答（利用者がタップで答える） ----------
-# ボタンを出して答えられるのは、承認の画面（選択肢の 1 が Yes で、No もある）だけ。画面の文字の読み取りは揺れるので、
-# それ以外（選択式の質問・フォルダの信頼・読めない・わからない）は中身を見せるだけで、キーは送らない
+# ボタンを出して答えられるのは、Claude Code の承認の画面と言い切れるときだけ。画面の文字の読み取りは揺れるので、
+# それ以外（選択式の質問・フォルダの信頼・読めない・わからない・セッション ID が無い）は中身を見せるだけで、キーは送らない
+QUESTION_ONLY = ("Type something.", "Chat about this")  # 選択式の質問（AskUserQuestion）にだけある選択肢
+
+
+def is_permission(text: str) -> bool:
+    """Claude Code の承認の画面か。parse_prompt の「1 が Yes で No もある」に加えて、承認の画面にしか無い形を求める
+    （「Do you want to …」の行・最後の選択肢が No・質問の選択肢と操作案内（Enter to select）が無い）。
+    選択肢が Yes と No の選択式の質問を、承認と取り違えないため（2026-10-21 実画面で確認）。"""
+    opts = parse_prompt(text)["options"]
+    if not opts or opts.get(1, "").lower() != "yes" or not opts[max(opts)].lower().startswith("no"):
+        return False
+    if any(v in QUESTION_ONLY for v in opts.values()):
+        return False
+    asked = asked_part(text).splitlines()
+    foot = next((l for l in reversed(asked) if "Esc to cancel" in l), "")
+    return "Enter to select" not in foot and any(l.strip().startswith("Do you want to") for l in asked)
+
+
 def _ask_of(a: dict) -> dict:
-    """止まっているセッション a の問い。kind は permission / question / trust / unknown / none（止まっていない）/ unreadable。"""
+    """止まっているセッション a の問い。kind は permission（ボタンを出す）/ question / trust / unknown / none（止まっていない）/ unreadable。"""
     if a["status"] != "blocked":
         return {"kind": "none"}
     trust = pane_shows_trust(a["pane"])
@@ -1157,26 +1174,33 @@ def _ask_of(a: dict) -> dict:
         return {"kind": "unreadable" if trust is None else "trust"}
     text = read_prompt(a["pane"])
     asked = asked_part(text)
-    return {"kind": parse_prompt(text)["kind"], "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
+    if is_permission(text) and a.get("session"):
+        kind = "permission"
+    elif "Enter to select" in text or any(v in text for v in QUESTION_ONLY):  # 選択式の質問の印がある
+        kind = "question"
+    else:  # 言い切れない（選択肢が映りきっていない、セッションを見分けられない、など）。ボタンは出さない
+        kind = "unknown"
+    return {"kind": kind, "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
 
 
 def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
-    """pane と key が指すセッションと、その問い。key は必須（開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居ることがある）。"""
+    """pane と key が指すセッションと、その問い。key はセッション ID で必須（同じ場所でセッションが立て直されていたら別物として断る。
+    ハブも、話し相手の選択に使う "hub" ではなく、いまのセッション ID で見分ける）。"""
     a = next((a for a in list_agents() if a["pane"] == pane), None)
-    if not a or not key or agent_key(a) != key:
+    if not a or not key or a.get("session") != key:
         return None, {"kind": "gone"}
     return a, _ask_of(a)
 
 
 @app.get("/api/prompts")
 def api_prompts():
-    """止まっているセッションすべての問い。画面はこれを上に並べ、承認の画面にだけボタンを出す。"""
+    """止まっているセッションすべての問い。画面はこれを上に並べ、承認の画面にだけボタンを出す。key はセッション ID。"""
     out = []
     for a in list_agents():
         if a["status"] == "blocked":
             asked = _ask_of(a)
             if asked["kind"] != "none":
-                out.append({"pane": a["pane"], "key": agent_key(a), "name": "ハブ" if a["hub"] else f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}", **asked})
+                out.append({"pane": a["pane"], "key": a.get("session") or "", "name": "ハブ" if a["hub"] else f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}", **asked})
     return JSONResponse(out)
 
 

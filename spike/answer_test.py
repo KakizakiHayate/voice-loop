@@ -37,6 +37,36 @@ QUESTION = """⏺ どちらで進めますか？
    3. Type something.
  Enter to select · ↑/↓ to navigate · Esc to cancel"""
 UNKNOWN = "⏺ 考えています\n  何か入力してください"
+# 2026-10-21 に本物の Claude Code で取った画面と同じ形（場所だけ架空に置き換えた）
+REAL_WRITE = """⏺ Write(/Users/me/proj/shape.txt)
+ Create file
+ ../shape.txt
+  1 ok
+ Do you want to create shape.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session; Yes,
+      and always allow access to
+      /Users/me/proj for this
+      session (shift+tab)
+   3. No
+ Esc to cancel · Tab to amend"""
+REAL_YESNO = """⏺ Write(/Users/me/proj/shape.txt)
+  ⎿  User rejected write to /Users/me/proj/shape.txt
+ ☐ 確認
+続けますか？
+❯ 1. Yes
+     続けて作成を進める
+  2. No
+     作成を中止する
+  3. Type something.
+  4. Chat about this
+Enter to select · ↑/↓ to navigate · Esc to cancel"""
+YESNO_SHORT = """⏺ どうしますか
+ 続けますか？
+ ❯ 1. Yes
+   2. No
+   3. Type something.
+ Enter to select · ↑/↓ to navigate · Esc to cancel"""  # Codex の再現と同じ形
 
 AGENT = {"pane": "w9:p1", "title": "テスト", "cwd": "/tmp/proj", "kind": "claude", "session": "sess-1",
          "status": "blocked", "name": "", "hub": False}
@@ -133,6 +163,36 @@ case("質問への返答", screen=QUESTION)
 fp = prompt()["fp"]
 check("質問には、許可も断るも送らない（承認の画面だけに答える）",
       [(answer(fp=fp, choice=c)[0]["reason"], state["sent"]) for c in ("allow", "deny")], [("not_permission", []), ("not_permission", [])])
+
+case("本物の Write の承認", screen=REAL_WRITE)
+check("本物の Write の承認はボタンを出す", prompt()["kind"], "permission")
+check("本物の Write の承認に許可を送れる", answer(fp=prompt()["fp"], choice="allow")[1], ["1"])
+for name, screen in (("本物の Yes／No の質問", REAL_YESNO), ("Yes／No の質問（短い形）", YESNO_SHORT)):
+    case(name, screen=screen)
+    p = prompt()
+    check(f"{name}は承認と取り違えない", p["kind"], "question")
+    check(f"{name}には許可も断るも送らない", [answer(fp=p["fp"], choice=c)[1] for c in ("allow", "deny")], [[], []])
+case("Do you want to が無い", screen=PERMISSION.replace("Do you want to proceed?", "続けますか？"))
+check("承認の形がそろわなければボタンを出さない", prompt()["kind"], "unknown")
+# ペインの高さが足りず、選択肢が「1. Yes」しか映っていない（2026-10-21 実画面で確認）
+case("選択肢が映りきっていない", screen="⏺ Write(/Users/me/proj/a.txt)\n Do you want to create a.txt?\n ❯ 1. Yes\n Esc to cancel · Tab to amend")
+p = prompt()
+check("選択肢が映りきっていなければボタンを出さず、送らない", (p["kind"], [answer(fp=p["fp"], choice=c)[1] for c in ("allow", "deny")]), ("unknown", [[], []]))
+
+# セッションの立て直し（ハブも、key はセッション ID で見分ける）
+AGENT_HUB = {**AGENT, "hub": True, "cwd": str(s.HUB_DIR), "session": "old-session"}
+s.list_agents = lambda: [{**AGENT_HUB, "status": "blocked"}]
+case("ハブの承認")
+fp = s._asked("w9:p1", "old-session")[1]["fp"]
+AGENT_HUB["session"] = "new-session"  # 同じ場所でハブが立て直された（画面の文字は同じ）
+state["sent"].clear(); s.ANSWERED.clear()
+r = json.loads(asyncio.run(s.api_answer({"pane": "w9:p1", "key": "old-session", "fp": fp, "choice": "allow"})).body)
+check("立て直されたハブには、古い欄から送らない", (r["reason"], state["sent"]), ("gone", []))
+r = json.loads(asyncio.run(s.api_answer({"pane": "w9:p1", "key": "hub", "fp": fp, "choice": "allow"})).body)
+check("ハブを \"hub\" で指しても送らない", (r["reason"], state["sent"]), ("gone", []))
+AGENT_HUB["session"] = None  # セッション ID が無い
+check("セッション ID が無ければボタンを出さない", s._ask_of({**AGENT_HUB, "status": "blocked"})["kind"], "unknown")
+s.list_agents = lambda: [{**AGENT, "status": state["status"]}]
 
 case("わからない画面", screen=UNKNOWN)
 fp = prompt()["fp"]

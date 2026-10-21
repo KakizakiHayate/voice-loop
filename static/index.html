@@ -197,7 +197,7 @@ $('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = 
 // 押すと、送る直前に本体が同じ問いか（指紋）を確かめる。取り消しにくい操作に見えるときは、もう一度押してから許可する
 const ASK_HEAD = {
   permission: '承認を待っています', question: '質問で止まっています。端末かハブで答えてください',
-  trust: 'フォルダを信頼するか聞いています。端末で答えてください', unknown: '入力を待っています。端末で答えてください',
+  trust: 'フォルダを信頼するか聞いています。端末で答えてください', unknown: '止まっています。端末で答えてください',
   unreadable: '止まっていますが、画面を読めませんでした',
 };
 const ANSWER_FAIL = {
@@ -232,7 +232,10 @@ function renderAsk(q) {
   el.className = 'ask'; el.dataset.pane = q.pane; head.className = 'head';
   head.textContent = `${q.name}｜` + (q.kind === 'permission' && q.risky ? '⚠ 取り消しにくい操作かもしれません。' : '') + (ASK_HEAD[q.kind] || ASK_HEAD.unknown);
   el.appendChild(head);
-  if (q.text) { const pre = document.createElement('pre'); pre.textContent = q.text; el.appendChild(pre); }
+  if (q.text) {
+    const pre = document.createElement('pre'); pre.textContent = q.text; el.appendChild(pre);
+    if (q.kind !== 'permission') requestAnimationFrame(() => { pre.scrollTop = pre.scrollHeight; }); // 承認はコマンドの見える上から、ほかは問いのある下から見せる
+  }
   if (q.kind === 'permission') {
     const row = document.createElement('div'); row.className = 'row';
     for (const [choice, label] of [['allow', '許可（今回だけ）'], ['deny', '断る']]) {
