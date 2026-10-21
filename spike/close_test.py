@@ -102,11 +102,13 @@ for reply in ("proj の「テスト」を閉じてもいいですか？", "proj 
     say("はい")
     check(f"聞いたときの返答「{reply}」は問いとして読む", close(confirmed=True), ("ok", ["w9:p1"]))
 for answer in ("README を見せて", "閉じないで", "いいえ", "いや、やめておいて", "ええと、どうしようかな", "うーん", "待って", "はい、でもまだ残して",
-               "ううん", "うん、閉じるのは後でお願い"):  # 最後の2つは Codex 第2回の再現
+               "ううん", "うん、閉じるのは後でお願い",  # この2つは Codex 第2回の再現
+               "今度にして", "うん、また今度お願い", "いいよ、今度で"):
     asked()
     say(answer)
     check(f"答えが「{answer}」なら閉じない", close(confirmed=True), ("not_yes", []))
-for answer in ("うん、お願い", "OKです", "閉じちゃって", "いいよ", "ええ、どうぞ", "yes"):
+for answer in ("うん、お願い", "OKです", "閉じちゃって", "いいよ", "ええ、どうぞ", "yes",
+               "はい、今度こそ閉じてください", "今度は閉じていいよ"):  # 最後の2つは Codex 第3回の再現
     asked()
     say(answer)
     check(f"答えが「{answer}」なら閉じる", close(confirmed=True), ("ok", ["w9:p1"]))
