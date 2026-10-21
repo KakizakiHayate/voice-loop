@@ -117,9 +117,8 @@ PROMPT_MAX = 700
 BG_NOTICE_AFTER = float(os.environ.get("VL_BG_NOTICE_AFTER", "180"))  # 相手の裏の作業が長引いたとき、「まだ動いている」と一度知らせるまでの秒数
 # ハブがセッションを立ててよいのは、この直下の既存プロジェクトだけ。未設定なら、セッションの起動は使えない
 PROJECTS_DIR = Path(os.environ["VL_PROJECTS_DIR"]).expanduser() if os.environ.get("VL_PROJECTS_DIR") else None
-SPAWN_MAX = 3  # ハブが立てたセッションを同時に生かしておける数
 SPAWN_MODELS = {"opus", "sonnet", "haiku", "fable"}
-SPAWN_PREFIX = "hubjob-"  # ハブが立てたセッションの herdr 上の名前の頭（数を数えるのに使う）
+SPAWN_PREFIX = "hubjob-"  # ハブが立てたセッションの herdr 上の名前の頭（ハブが立てたものと見分けるため）
 PASTED = re.compile(r'^\s*<pasted_content id="[^"]*">\n(.*)\n</pasted_content id="[^"]*">\s*$', re.S)
 # 無音から whisper が生む定番文。これが来たら「聞こえなかった」扱い
 HALLUCINATIONS = {"ご視聴ありがとうございました", "次の動画でお会いしましょう", "チャンネル登録お願いします", "おやすみなさい", "ありがとうございました"}
@@ -418,15 +417,30 @@ def last_turn_id(path: Path) -> str | None:
     return None
 
 
-def last_human_turn_id(path: Path | None) -> str | None:
-    """ユーザー本人の最後の発言の ID（自動通知は数えない）。「ユーザーが新しく何か言ったか」を見分けるのに使う。"""
+def human_turns(path: Path | None, n: int = 1) -> list[tuple[str, str]]:
+    """ユーザー本人の発言の (ID, 文) を、新しいものから n 件（自動通知は数えない）。「ユーザーが新しく何か言ったか」を見分けるのに使う。"""
     if not (path and path.exists()):
-        return None
-    lines = read_lines(path, tail_bytes=600_000)
+        return []
+    lines, out = read_lines(path, tail_bytes=600_000), []
     for i in range(len(lines) - 1, -1, -1):
-        if any(kind == "user" and not text.startswith(NOTE_PREFIX) for kind, text in iter_events([lines[i]])):
-            return json.loads(lines[i]).get("uuid") or f"line-{i}"
-    return None
+        if len(out) >= n:
+            break
+        said = [text for kind, text in iter_events([lines[i]]) if kind == "user" and not text.startswith(NOTE_PREFIX)]
+        if said:
+            out.append((json.loads(lines[i]).get("uuid") or f"line-{i}", said[0]))
+    return out
+
+
+def reply_to(path: Path | None, turn: str) -> str:
+    """記録の中の発言 turn への返答（最後のツール呼び出しより後の文 = ユーザーが聞いたもの）。見つからなければ空。"""
+    if not (path and path.exists()):
+        return ""
+    lines = read_lines(path, tail_bytes=600_000)
+    for i, line in enumerate(lines):
+        if f'"{turn}"' in line and json.loads(line).get("uuid") == turn:
+            end = next((j for j in range(i + 1, len(lines)) if any(k == "user" for k, _ in iter_events([lines[j]]))), len(lines))
+            return last_exchange(lines[i:end])[1]
+    return ""
 
 
 def reply_since(path: Path, offset: int) -> str:
@@ -981,8 +995,8 @@ async def _watch_delegation(d: dict):
         if WATCH_GEN.get(d["pane"]) != d["gen"]:
             return  # 同じセッションに新しい指示が送られた。見張りは最新の1つに任せる（古い件の名前で通知を重ねない）
         a = next((x for x in await asyncio.to_thread(list_agents) if x["pane"] == d["pane"] and x["cwd"] == d["cwd"]), None)
-        if not a:
-            return await report(d, "gone") if reported is None else None
+        if not a:  # ハブがユーザーの許可で閉じたものは、知らせない
+            return await report(d, "gone") if reported is None and d["pane"] not in CLOSED else None
         if a["status"] == "working":
             saw_working, told_blocked, quiet = True, False, 0
             continue
@@ -1128,9 +1142,13 @@ def prompt_fp(text: str) -> str:
     return hashlib.sha1(" ".join(text.split()).encode()).hexdigest()
 
 
-def hub_human_turn() -> str | None:
+def hub_log() -> Path | None:
     hub = next((a for a in list_agents() if a["hub"]), None)
-    return last_human_turn_id(jsonl_path(hub)) if hub else None
+    return jsonl_path(hub) if hub else None
+
+
+def hub_human_turn() -> str | None:
+    return next((turn for turn, _ in human_turns(hub_log())), None)
 
 
 @app.post("/api/hub/answer")
@@ -1337,9 +1355,6 @@ async def hub_spawn(body: dict):
         return JSONResponse({"ok": False, "reason": "bad_model", "models": sorted(SPAWN_MODELS)})
     if len(text) > PROMPT_MAX:
         return JSONResponse({"ok": False, "reason": "too_long", "length": len(text), "max": PROMPT_MAX})
-    live = [a for a in await asyncio.to_thread(list_agents) if a["name"].startswith(SPAWN_PREFIX)]
-    if len(live) >= SPAWN_MAX:
-        return JSONResponse({"ok": False, "reason": "limit", "max": SPAWN_MAX, "live": [f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}" for a in live]})
     r = await asyncio.to_thread(spawn_session, directory, project, model)
     hlog(f"spawn → {project} ({model}): {json.dumps(r, ensure_ascii=False)[:160]}", flush=True)
     if not r["ok"]:
@@ -1350,6 +1365,71 @@ async def hub_spawn(body: dict):
         sent = await dispatch(a, text) if a else {"ok": False, "reason": "起動したセッションが見つかりません"}
         out["sent"], out["send_error"] = sent["ok"], None if sent["ok"] else sent.get("reason")
     return JSONResponse(out)
+
+
+# ---------- セッションを閉じる（取り消せないので、ユーザーがはっきり許可してから） ----------
+CLOSING: dict[str, tuple[tuple, str | None]] = {}  # 閉じていいかを聞いている: pane → (どのセッションか, 聞いたときのユーザーの最後の発言)
+CLOSED: set[str] = set()  # ハブが閉じた pane。見張りに「見つからなくなった」と知らせさせない
+# 許可の答えの読み取り。断りの語が1つでもあれば閉じない。はっきり許す語が無いときも閉じない（どちらも聞き直し）
+CLOSE_NO = re.compile(r"いいえ|ううん|いや|だめ|ダメ|駄目|やめ|止め|待って|まって|ないで|残して|まだ|後で|あとで|また今度|今度[にでね]|(?<![a-z])(no|not|don't|stop|wait|later)(?![a-z])", re.I)
+CLOSE_YES = re.compile(r"はい|うん|ええ(?!っ?と)|いい|お願い|おねがい|閉じて|閉じちゃ|とじて|オーケー|オッケー|大丈夫|どうぞ|構わない|かまわない|頼む|よろしく|(?<![a-z])(yes|ok|okay|sure)(?![a-z])", re.I)
+# 閉じていいかの問い（「閉じていいですか」「閉じてもいい？」「閉じていいか、聞かせてください」「閉じますか」）。
+# 「閉じませんでした」のような報告や、「閉じると何が起きるか説明しましょうか」を、問いと取り違えないため
+CLOSE_QUESTION = re.compile(r"閉じ(て(も)?(いい|よろしい)(です)?|ます|ましょう)(か|[?？])")
+
+
+def asks_to_close(reply: str, project: str) -> bool:
+    """ハブの返答（ユーザーが聞いた文）が、プロジェクト名を挙げて、閉じていいかを問うているか。"""
+    return project.lower() in reply.lower() and bool(CLOSE_QUESTION.search(reply))
+
+
+@app.post("/api/hub/close")
+async def hub_close(body: dict):
+    """セッションを閉じる（pane を閉じる。タブやワークスペースが空になれば herdr がそれも閉じる。会話の記録は残る）。
+    守ること（ハブの判断に任せず、ハブの記録で確かめる）:
+      1回目は閉じずに、閉じる相手を返す（ハブはそれをユーザーに伝えて許可を聞く）。
+      閉じるのは confirmed で、聞いたときのユーザーの発言の、すぐ次の発言の中だけ（同じ発言の中では閉じない。あいだに別の発言をはさんだら聞き直し）。
+      さらに、聞いたときのハブの返答（ユーザーが聞いた文）が、プロジェクト名を挙げて閉じていいかを問うていて、
+      ユーザーの次の発言が、はっきり許す語を含み、断りの語を含まないこと。
+      セッション ID の無い相手は、入れ替わっても見分けられないので閉じない。"""
+    if REPORTING:
+        return JSONResponse({"ok": False, "reason": "reporting"})
+    pane, confirmed = str(body.get("pane", "")), bool(body.get("confirmed"))
+    held = CLOSING.get(pane)
+    log = await asyncio.to_thread(hub_log)
+    (now, said), (before, _) = (await asyncio.to_thread(human_turns, log, 2) + [(None, "")] * 2)[:2]
+    heard = await asyncio.to_thread(reply_to, log, held[1]) if confirmed and held and held[1] else ""
+    a = await asyncio.to_thread(_worker, pane)  # 相手は最後に見る（閉じるまでに入れ替わる隙を小さくする）。ハブ自身は閉じない
+    if not a:
+        return JSONResponse({"ok": False, "reason": "gone"}, status_code=404)
+    if not a.get("session"):
+        return JSONResponse({"ok": False, "reason": "unidentified"})
+    who, project = (a["cwd"], a["session"]), a["cwd"].rsplit("/", 1)[-1]
+    why = "confirm"
+    if confirmed and held and held is CLOSING.get(pane) and held[0] == who:
+        if held[1] == now:  # 聞いたのと同じ発言の中 = ユーザーはまだ何を閉じるか聞いていない
+            return JSONResponse({"ok": False, "reason": "same_turn"})
+        if now and held[1] and held[1] == before:
+            if not asks_to_close(heard, project):
+                why = "not_asked"
+            elif CLOSE_NO.search(said) or not CLOSE_YES.search(said):
+                why = "not_yes"
+            else:
+                del CLOSING[pane]  # 閉じる前に外す（重ねて届いた同じ許可で、二度閉じない）
+                CLOSED.add(pane)
+                r = await asyncio.to_thread(herdr, "pane", "close", pane)
+                hlog(f"close → {pane} ({project}): 許可「{_clip(said, 40)}」 {'ok' if 'result' in r else 'ERR ' + json.dumps(r, ensure_ascii=False)[:120]}", flush=True)
+                if "result" not in r:
+                    CLOSED.discard(pane)
+                    return JSONResponse({"ok": False, "reason": "herdr"})
+                SEEN_PROMPT.pop(pane, None)
+                CONFIRMING.pop(pane, None)
+                return JSONResponse({"ok": True, "project": project, "title": a["title"]})
+    CLOSING[pane] = (who, now)  # ここから聞く（聞き直す）。閉じてよいのは、ユーザーの次の発言の中だけ
+    path = jsonl_path(a)
+    user = last_exchange(read_lines(path, tail_bytes=600_000))[0] if path and path.exists() else ""
+    return JSONResponse({"ok": False, "reason": why, "project": project, "title": a["title"], "status": a["status"],
+                         "last_user": _clip(user, 200), "said": _clip(said, 80)})
 
 
 @app.websocket("/ws")
