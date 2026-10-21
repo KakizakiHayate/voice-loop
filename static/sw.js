@@ -2,7 +2,8 @@
 // 届かないときの案内と、つながったときの戻り方は画面（index.html）が受け持つ。
 //
 // 取り方: まず Mac に取りに行き、取れたら手元の写しも新しくする。3秒で返ってこないとき（通信が止まって
-// 待たされるとき）と、取れなかったときだけ、手元の写しで答える。更新したのに古い画面が出続けることを避けるため。
+// 待たされるとき）、取れなかったとき、502 などのサーバー側のエラーのときだけ、手元の写しで答える。
+// 更新したのに古い画面が出続けることを避けるため。
 // 扱うのは画面（/ を開く操作）と SHELL のファイルだけ。/api と /ws には手を出さない（一覧や会話を古い写しで答えない）。
 // 写しに残すのは、転送されていない 200 だけ（ほかのページへの転送や失敗の応答を、画面として残さない）。
 const CACHE = 'voice-loop-shell-v1';
@@ -49,7 +50,9 @@ self.addEventListener('fetch', e => {
   e.waitUntil(net.then(() => saved, () => {})); // 先に写しで答えても、取りに行った分で写しを新しくする
   e.respondWith((async () => {
     try {
-      return await Promise.race([net, new Promise((_, no) => setTimeout(no, WAIT_MS))]);
+      const res = await Promise.race([net, new Promise((_, no) => setTimeout(no, WAIT_MS))]);
+      if (res.status < 500) return res;
+      return (await caches.match(key)) || res; // 502 など（中継は届くが本体が止まっている）も、写しの画面で答える
     } catch {
       return (await caches.match(key)) || net; // 写しが無い（初めて開いた）ときは、Mac の返事を待つ
     }

@@ -285,9 +285,16 @@ function connect() {
 function linked() { return !!ws && ws.readyState === 1; }
 // 届かなかった間に変わったもの（一覧・声・会話）を取り直す
 async function catchUp() {
-  if (!$('speaker').options.length) await loadSpeakers().catch(() => {});
+  await ensureSpeakers();
   agentsSig = ''; shownPane = null; // 一覧と履歴を描き直させる
   await loadAgents();
+}
+// 声の一覧がまだ無ければ読む。読めなければ、つながっている間は3秒ごとに読み直す（重ねて読みに行かない）
+let speakersBusy = false;
+async function ensureSpeakers() {
+  if (speakersBusy || $('speaker').options.length) return;
+  speakersBusy = true;
+  try { await loadSpeakers(); } catch { setTimeout(() => { if (linked()) ensureSpeakers(); }, 3000); } finally { speakersBusy = false; }
 }
 function sendTurnStart() { stopPlayback(); serverDone = true; }
 
@@ -336,9 +343,9 @@ $('typedForm').onsubmit = e => {
 setSession('playback');
 applyTarget(); // つながるまでは話す・送るを押せないようにしておく
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // Mac に届かなくても画面は開けるように（sw.js）
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
 window.addEventListener('online', () => connect());
-setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) loadAgents(); }, 20000);
+setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) { loadAgents(); ensureSpeakers(); } }, 20000);
 // 一覧と声を読んでからつなぐ。届かないときは5秒で見切って案内を出し、つなぎに行く（つながりしだい catchUp で取り直す）
 Promise.race([Promise.allSettled([loadAgents(), loadSpeakers()]).then(() => true), new Promise(r => setTimeout(() => r(false), 5000))])
   .then(answered => { if (!answered) setStatus(UNREACHABLE); connect(); });
