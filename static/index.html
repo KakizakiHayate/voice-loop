@@ -248,8 +248,9 @@ function stopPlayback() { gen++; queue = []; playing = false; accepting = false;
 function finishSpeaking(msg = '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
 
 // ---------- 通信 ----------
-// Mac に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す
-const UNREACHABLE = 'Mac に届きません。接続を確かめてください';
+// 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。
+// 案内は届かない先を名指ししない（本体が Mac とは限らない）
+const UNREACHABLE = '接続できません。接続を確かめてください';
 let away = false, retry = null;
 function connect() {
   clearTimeout(retry);
@@ -317,11 +318,11 @@ async function startRec() {
   rec.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
     setSession('playback'); // マイクを離したら再生用に戻す（受話口から小さく鳴るのを防ぐ）
+    if (!linked()) { setStatus(UNREACHABLE); return; } // 話しているあいだに届かなくなった（短い録音でも、こちらの案内を残す）
     const blob = new Blob(chunks, { type: mime || 'audio/webm' });
     if (blob.size < 2000) { setStatus('短すぎました'); return; }
     sendTurnStart();
     if (!$('agent').value) { setStatus('話し相手を選んでください'); return; }
-    if (!linked()) { setStatus(UNREACHABLE); return; } // 話しているあいだに届かなくなった
     ws.send(JSON.stringify({ type: 'turn', pane: $('agent').value, key: curKey(), speaker: $('speaker').value, filename: 'rec.' + ext }));
     ws.send(await blob.arrayBuffer());
     setStatus('聞き取り中…');
