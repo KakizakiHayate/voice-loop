@@ -6,6 +6,7 @@
 // 更新したのに古い画面が出続けることを避けるため。
 // 扱うのは画面（/ を開く操作）と SHELL のファイルだけ。/api と /ws には手を出さない（一覧や会話を古い写しで答えない）。
 // 写しに残すのは、転送されていない 200 だけ（ほかのページへの転送や失敗の応答を、画面として残さない）。
+// 画面の「↻」（/?fresh）だけは写しで答えず、Mac の返事を待つ（取れたら写しも新しくなるので、続けて読み込み直すと最新の画面になる）。
 const CACHE = 'voice-loop-shell-v1';
 const SHELL = [
   '/',
@@ -48,6 +49,7 @@ self.addEventListener('fetch', e => {
     return res;
   });
   e.waitUntil(net.then(() => saved, () => {})); // 先に写しで答えても、取りに行った分で写しを新しくする
+  if (url.search === '?fresh') return e.respondWith(net); // 届かなければ失敗のまま返す（画面はそのまま案内を出す）
   e.respondWith((async () => {
     try {
       const res = await Promise.race([net, new Promise((_, no) => setTimeout(no, WAIT_MS))]);

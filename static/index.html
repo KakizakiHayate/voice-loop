@@ -46,6 +46,8 @@
   #status { color:var(--mute); font-size:13px; min-height:1.6em; display:flex; align-items:center; gap:6px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--mute); flex:none; }
   .dot.on { background:var(--ok); }
+  #statusText { flex:1; min-width:0; }
+  #reload { flex:none; border:none; background:none; color:var(--mute); font-size:16px; line-height:1; padding:4px 6px; margin:-4px -6px; } /* 目立たないように小さく、押せる広さは少し持たせる */
   #tap, #hubStart { display:none; margin-left:auto; border:none; border-radius:8px; background:var(--ok); color:#fff; font-size:13px; padding:4px 10px; }
   button:disabled, input:disabled { opacity:.35; }
   .row { display:flex; gap:8px; }
@@ -71,7 +73,7 @@
   <div id="asks"></div>
   <div id="log"></div>
   <div id="bar">
-    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button></div>
+    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
     <form id="typedForm" class="row"><input id="typed" placeholder="文字で送る" autocomplete="off"><button id="send" type="submit">送る</button></form>
@@ -429,6 +431,17 @@ $('typedForm').onsubmit = e => {
 // ---------- 起動 ----------
 setSession('playback');
 applyTarget(); // つながるまでは話す・送るを押せないようにしておく
+// ホーム画面から開いたときはブラウザの読み込み直しが無いので、「↻」で最新の画面に替える。
+// 写し（sw.js）で答えさせずに取りに行き、取れたときだけ読み込み直す（届かないときは、今の画面のまま案内を出す）
+$('reload').onclick = async () => {
+  $('reload').disabled = true; setStatus('読み込み直しています…');
+  try {
+    const res = await fetch('/?fresh', { cache: 'no-store', signal: AbortSignal.timeout?.(10000) });
+    await res.text(); // 最後まで受け取れたことを確かめる
+    if (res.status !== 200) throw new Error(res.status);
+    location.reload();
+  } catch { $('reload').disabled = false; setStatus(UNREACHABLE); }
+};
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // Mac に届かなくても画面は開けるように（sw.js）
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
 window.addEventListener('online', () => connect());
