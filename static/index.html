@@ -163,7 +163,7 @@ async function loadAgents() {
   const ph = document.createElement('option'); ph.value = ''; ph.disabled = true; ph.textContent = '話し相手を選んでください'; sel.appendChild(ph);
   for (const a of list) {
     const o = document.createElement('option'); o.value = a.pane;
-    o.textContent = a.hub ? `ハブ｜全セッションを統括 [${a.status}]` : a.hermes ? 'Hermes｜読むだけの話し相手（試験中）' : `${a.cwd.split('/').pop()}｜${a.title} [${a.status}]`;
+    o.textContent = a.hub ? `ハブ${a.hermes ? '（Hermes）' : ''}｜全セッションを統括 [${a.status}]` : a.hermes ? 'Hermes｜話し相手（試験中）' : `${a.cwd.split('/').pop()}｜${a.title} [${a.status}]`;
     sel.appendChild(o);
   }
   const keep = list.find(a => a.key === want);

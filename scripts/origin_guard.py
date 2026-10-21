@@ -7,14 +7,16 @@
   ブラウザは別のサイトからの接続に必ず Origin を付け、ページの側では書き換えられない
 Origin の無い接続（hubctl、curl、画面そのものの読み込み）は通す。ブラウザの外からここへ届くのは、
 この Mac の上のプログラムと tailnet の端末だけで、そこは信頼する範囲として扱う（README「接続できる範囲」）。
-- コンテナ … Docker（OrbStack など）の中からは host.docker.internal という名前で届く。そこからは、Hermes が
-  セッションを読むための GET 2 本（/api/hub/sessions と /api/hub/read）だけを通し、送る・答える・立てる・画面は断る。"""
+- コンテナ … Docker（OrbStack など）の中からは host.docker.internal という名前で届く。そこからは、Hermes の hubctl が使う
+  /api/hub/ の口だけを、X-VL-Key が VL_HERMES_KEY と一致するときに通す。画面（/）・WebSocket・画面用の API は断る。
+  鍵は Hermes の API サーバーの鍵と同じ値で、本体とコンテナのあいだを双方向に守る（コンテナ側には hub_key として読み取り専用で置く）。"""
 import os
 import urllib.parse
 
 LOCAL_NAMES = {"127.0.0.1", "localhost", "::1"}
 DOCKER_NAME = "host.docker.internal"  # コンテナから見た、この Mac の名前
-DOCKER_READ_ONLY = {"/api/hub/sessions", "/api/hub/read"}  # コンテナに許すのは、読む 2 本だけ
+DOCKER_ALLOWED = {("GET", "/api/hub/sessions"), ("GET", "/api/hub/read"), ("GET", "/api/hub/screen"),
+                  ("POST", "/api/hub/send"), ("POST", "/api/hub/answer"), ("POST", "/api/hub/spawn"), ("POST", "/api/hub/close")}
 
 
 def _allowed_name(name: str) -> bool:
@@ -33,8 +35,11 @@ def problem(headers: dict[str, str], method: str = "GET", path: str = "") -> str
     if name == DOCKER_NAME:
         if origin is not None:
             return f"コンテナ経由のブラウザからは使えません（Origin {headers['origin']!r}）"
-        if method != "GET" or path not in DOCKER_READ_ONLY:
-            return f"コンテナからは読む 2 本（{', '.join(sorted(DOCKER_READ_ONLY))}）以外は使えません（{method} {path}）"
+        if (method, path) not in DOCKER_ALLOWED:
+            return f"コンテナからは hubctl の口以外は使えません（{method} {path}）"
+        key = os.environ.get("VL_HERMES_KEY", "")
+        if not key or headers.get("x-vl-key", "") != key:
+            return "コンテナからの接続に、正しい鍵（X-VL-Key）が付いていません"
         return None
     if not _allowed_name(name):
         return f"Host {host!r} はこの Mac の名前ではありません"
