@@ -189,7 +189,8 @@ async function loadSpeakers() {
   const sp = await (await fetch('/api/speakers')).json();
   const sel = $('speaker'); sel.innerHTML = '';
   for (const s of sp) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; sel.appendChild(o); }
-  const saved = localStorage.getItem('vl.speaker'); if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved;
+  const saved = localStorage.getItem('vl.speaker'), def = sp.find(s => s.default);
+  if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved; else if (def) sel.value = def.id; // 覚えている声が無い（エンジンを替えた直後など）なら既定の声
 }
 const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value })); } catch {} }; // ハブからの報告を、選んでいる声で届けてもらう
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };

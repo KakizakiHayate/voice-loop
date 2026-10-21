@@ -14,7 +14,7 @@
   → 聞き取り（whisper）        声を文字にする
   → herdr → Claude Code         セッションに送り、返事を記録から読む
   → 語り手（軽いモデル）        返事を話し言葉に直す
-  → 声（AivisSpeech）           読み上げる
+  → 声（AivisSpeech か VOICEVOX）読み上げる
   → ブラウザで再生
 ```
 
@@ -30,7 +30,7 @@ macOS 専用です。次のものが要ります。足りないものは、あ�
 | Claude Code と、herdr の Claude 連携 | 話し相手。連携が無いと返事を記録から読めません |
 | uv | 本体とハブの道具の実行 |
 | whisper のサーバー | 聞き取り |
-| AivisSpeech Engine | 声 |
+| AivisSpeech Engine（または VOICEVOX Engine） | 声 |
 | Anthropic の API の認証 | 語り手（返事を話し言葉に直すモデル） |
 | Tailscale（任意） | スマホから使うとき |
 
@@ -74,6 +74,26 @@ cd ~/.local/state/whisper-work && whisper-server \
 docker run -d --name aivis --restart unless-stopped \
   -p 127.0.0.1:10101:10101 ghcr.io/aivis-project/aivisspeech-engine:cpu-latest
 ```
+
+### 軽い声にするなら（VOICEVOX）
+
+AivisSpeech は CPU だけで計算し（Mac の GPU には対応していません）、待機中もメモリを約1.9GB使います。メモリの少ない Mac では、代わりに VOICEVOX Engine を使えます。声の顔ぶれは変わります。
+
+作者の Mac mini（M4 Pro）で、約6秒の文を作るのにかかった時間です。
+
+| | 1文の合成 | 待機中のメモリ | イメージ |
+|---|---|---|---|
+| AivisSpeech | 2.0〜3.1 秒 | 1.86GB | 3.7GB |
+| VOICEVOX | 0.8〜1.0 秒 | 78MB | 2.3GB |
+
+```sh
+docker run -d --name voicevox --restart unless-stopped \
+  -p 127.0.0.1:50021:50021 voicevox/voicevox_engine:cpu-latest
+```
+
+設定フォルダの `config.env` に `VL_VOICE=voicevox` と書き、`restart` します。既定の声は春日部つむぎで、画面でほかの声を選べます。
+
+VOICEVOX の声は、キャラクターごとの利用規約に従って使います。作った音声を人に公開するときは、「VOICEVOX:春日部つむぎ」のようなクレジットの表記が要ります（[利用規約](https://voicevox.hiroshiba.jp/term/)）。
 
 ### 語り手の認証
 
@@ -193,6 +213,7 @@ herdr に更新の命令は無いので、入れ直します。設定フォル�
 - ほかの Mac への導入
 - GitHub からの `herdr plugin install`（手元のフォルダを `herdr plugin link` で登録する形だけ確認済み）
 - Mac を再起動したあとの復帰
+- VOICEVOX の声での会話の通し（合成・声の一覧・点検・画面の既定の声までは確認済み）
 
 ## ライセンス
 
