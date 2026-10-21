@@ -318,11 +318,11 @@ async function startRec() {
   rec.onstop = async () => {
     stream.getTracks().forEach(t => t.stop());
     setSession('playback'); // マイクを離したら再生用に戻す（受話口から小さく鳴るのを防ぐ）
+    if (!linked()) { setStatus(UNREACHABLE); return; } // 話しているあいだに届かなくなった（短い録音でも、こちらの案内を残す）
     const blob = new Blob(chunks, { type: mime || 'audio/webm' });
     if (blob.size < 2000) { setStatus('短すぎました'); return; }
     sendTurnStart();
     if (!$('agent').value) { setStatus('話し相手を選んでください'); return; }
-    if (!linked()) { setStatus(UNREACHABLE); return; } // 話しているあいだに届かなくなった
     ws.send(JSON.stringify({ type: 'turn', pane: $('agent').value, key: curKey(), speaker: $('speaker').value, filename: 'rec.' + ext }));
     ws.send(await blob.arrayBuffer());
     setStatus('聞き取り中…');
