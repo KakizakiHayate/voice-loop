@@ -1145,6 +1145,107 @@ async def hub_answer(body: dict):
     return JSONResponse({"ok": True, "project": project, "title": a["title"], "said": said})
 
 
+# ---------- 画面のボタンからの返答（利用者がタップで答える） ----------
+# ボタンを出して答えられるのは、Claude Code の承認の画面と言い切れるときだけ。画面の文字の読み取りは揺れるので、
+# それ以外（選択式の質問・フォルダの信頼・読めない・わからない・セッション ID が無い）は中身を見せるだけで、キーは送らない
+QUESTION_ONLY = ("Type something.", "Chat about this")  # 選択式の質問（AskUserQuestion）にだけある選択肢
+
+
+def is_permission(text: str) -> bool:
+    """Claude Code の承認の画面か。parse_prompt の「1 が Yes で No もある」に加えて、承認の画面にしか無い形を求める
+    （「Do you want to …」の行・最後の選択肢が No・質問の選択肢と操作案内（Enter to select）が無い）。
+    選択肢が Yes と No の選択式の質問を、承認と取り違えないため（2026-10-21 実画面で確認）。"""
+    opts = parse_prompt(text)["options"]
+    if not opts or opts.get(1, "").lower() != "yes" or not opts[max(opts)].lower().startswith("no"):
+        return False
+    if any(v in QUESTION_ONLY for v in opts.values()):
+        return False
+    asked = asked_part(text).splitlines()
+    foot = next((l for l in reversed(asked) if "Esc to cancel" in l), "")
+    return "Enter to select" not in foot and any(l.strip().startswith("Do you want to") for l in asked)
+
+
+def _ask_of(a: dict) -> dict:
+    """止まっているセッション a の問い。kind は permission（ボタンを出す）/ question / trust / unknown / none（止まっていない）/ unreadable。"""
+    if a["status"] != "blocked":
+        return {"kind": "none"}
+    trust = pane_shows_trust(a["pane"])
+    if trust is None or trust:
+        return {"kind": "unreadable" if trust is None else "trust"}
+    text = read_prompt(a["pane"])
+    asked = asked_part(text)
+    if is_permission(text) and a.get("session"):
+        kind = "permission"
+    elif "Enter to select" in text or any(v in text for v in QUESTION_ONLY):  # 選択式の質問の印がある
+        kind = "question"
+    else:  # 言い切れない（選択肢が映りきっていない、セッションを見分けられない、など）。ボタンは出さない
+        kind = "unknown"
+    return {"kind": kind, "text": _clip(asked, 1200), "fp": prompt_fp(text), "risky": bool(RISKY.search(asked))}
+
+
+def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
+    """pane と key が指すセッションと、その問い。key はセッション ID で必須（同じ場所でセッションが立て直されていたら別物として断る。
+    ハブも、話し相手の選択に使う "hub" ではなく、いまのセッション ID で見分ける）。"""
+    a = next((a for a in list_agents() if a["pane"] == pane), None)
+    if not a or not key or a.get("session") != key:
+        return None, {"kind": "gone"}
+    return a, _ask_of(a)
+
+
+@app.get("/api/prompts")
+def api_prompts():
+    """止まっているセッションすべての問い。画面はこれを上に並べ、承認の画面にだけボタンを出す。key はセッション ID。"""
+    out = []
+    for a in list_agents():
+        if a["status"] == "blocked":
+            asked = _ask_of(a)
+            if asked["kind"] != "none":
+                out.append({"pane": a["pane"], "key": a.get("session") or "", "name": "ハブ" if a["hub"] else f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}", **asked})
+    return JSONResponse(out)
+
+
+_answer_lock = asyncio.Lock()  # 確かめてからキーを送るまでを、一度にひとつだけにする
+ANSWERED: dict[str, tuple[str, float]] = {}  # 画面のボタンで答えた問い: pane → (指紋, 時刻)
+ANSWERED_HOLD = 15  # 答えたあと、相手の状態が変わるまでのあいだ、同じ問いへの重ねた答えを断る秒数
+
+
+@app.post("/api/answer")
+async def api_answer(body: dict):
+    """画面のボタンで、止まっているセッションの問いに答える。
+    守ること: 画面に出したのと同じ問いにだけ答える（指紋で確かめる）。許可は「今回だけ」（1）で、「今後は聞かずに許可」は選ばない。
+    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。承認の画面と見分けられないもの（質問・フォルダの信頼など）には答えない。
+    同じ問いに二度答えない。"""
+    async with _answer_lock:
+        return await _answer(body)
+
+
+async def _answer(body: dict):
+    pane, key, fp = str(body.get("pane", "")), str(body.get("key", "")), str(body.get("fp", ""))
+    choice, confirmed = str(body.get("choice", "")), bool(body.get("confirmed"))
+    done = ANSWERED.get(pane)
+    if done and done[0] == fp and time.time() - done[1] < ANSWERED_HOLD:  # 二度押し・重ねた送信
+        return JSONResponse({"ok": False, "reason": "answered"})
+    a, asked = await asyncio.to_thread(_asked, pane, key)
+    if asked["kind"] != "permission":  # 承認の画面と見分けられないときは、何も送らない
+        return JSONResponse({"ok": False, "reason": asked["kind"] if asked["kind"] in ("gone", "none", "unreadable", "trust") else "not_permission"})
+    if asked["fp"] != fp:  # 画面に出したあとで問いが変わった
+        return JSONResponse({"ok": False, "reason": "changed"})
+    if choice == "allow":
+        if asked["risky"] and not confirmed:
+            return JSONResponse({"ok": False, "reason": "confirm"})
+        keys, said = "1", "許可（今回だけ）"
+    elif choice == "deny":
+        keys, said = "esc", "断る"
+    else:
+        return JSONResponse({"ok": False, "reason": "bad_choice"})
+    r = await asyncio.to_thread(herdr, "agent", "send-keys", pane, keys)
+    hlog(f"answer(画面) → {pane} ({a['cwd'].rsplit('/', 1)[-1]}): {said} {'ok' if 'result' in r else 'ERR'}", flush=True)
+    if "result" not in r:
+        return JSONResponse({"ok": False, "reason": "herdr"})
+    ANSWERED[pane] = (fp, time.time())
+    return JSONResponse({"ok": True, "said": said})
+
+
 # ---------- セッションの起動 ----------
 def spawn_session(directory: Path, project: str, model: str) -> dict:
     """プロジェクトのディレクトリで Claude Code を立てる。同名のワークスペースがあればその中のタブに、無ければ作る。"""
@@ -1238,6 +1339,7 @@ async def ws(sock: WebSocket):
                 await send(type="error", text=f"送信できませんでした: {reply}")
             elif state == "blocked":
                 await send(type="status", text="承認待ちです")
+                await send(type="blocked", pane=pane)  # 画面に、許可・断るのボタンを出させる
                 await speak_to([client], "【承認待ちの画面】\n" + reply, cancel)
             elif not reply.strip():
                 await send(type="error", text="回答を読めませんでした")
