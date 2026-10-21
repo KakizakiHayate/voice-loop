@@ -235,19 +235,25 @@ async function answer(choice) {
   let r; try { r = await (await fetch('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: q.pane, key: q.key, fp: q.fp, choice, confirmed }) })).json(); }
   catch { r = { ok: false, reason: 'unreachable' }; }
   answering = false;
-  if (r.ok) { showAsk(null); setStatus(choice === 'allow' ? '許可しました。続きを待っています…' : '断りました'); follow(); return; }
+  if (!sameAgent(curAgent(), q)) { // 送っている間に別の相手へ切り替えた → その相手の問いを出し直す（送った相手の続きは追わない）
+    if (!r.ok) sys('⚠ 前の相手に答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
+    showAsk(null); loadAsk(); return;
+  }
+  if (r.ok) { showAsk(null); setStatus(choice === 'allow' ? '許可しました。続きを待っています…' : '断りました'); follow(q); return; }
   sys('⚠ 答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
   showAsk(null); loadAsk();
 }
 $('allow').onclick = () => answer('allow');
 $('deny').onclick = () => answer('deny');
-// 答えたあと、相手が片づくか、また止まるまで一覧を見に行き、最後に会話を描き直す（3秒ごと、3分まで）
-function follow() {
+// 答えたあと、相手（target）が片づくか、また止まるまで一覧を見に行き、最後に会話を描き直す（3秒ごと、3分まで）。
+// 途中で別の相手に切り替えたら追うのをやめる
+function follow(target) {
   clearTimeout(followTimer); let n = 0;
   const tick = async () => {
     if (document.activeElement !== $('agent')) await loadAgents();
     const a = curAgent();
-    if (a && (a.status === 'working' || (a.status === 'blocked' && n < 2)) && ++n < 60) { followTimer = setTimeout(tick, 3000); return; }
+    if (!sameAgent(a, target)) return;
+    if (a.status === 'working' || (a.status === 'blocked' && n < 2)) { if (++n < 60) { followTimer = setTimeout(tick, 3000); return; } }
     if ($('agent').value) await loadThread();
     if (!asked) setStatus(linked() ? '準備できました' : UNREACHABLE);
   };
