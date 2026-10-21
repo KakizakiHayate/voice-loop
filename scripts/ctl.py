@@ -108,9 +108,11 @@ def scaffold(uv: str) -> list[str]:
     # Hermes をハブにするときの指示文・道具・鍵。コンテナに /opt/voice-loop として読み取り専用で見せる（README「Hermes をハブにする」）
     hermes = CONFIG / "hermes"
     hermes.mkdir(parents=True, exist_ok=True)
-    if not (hermes / "AGENTS.md").exists():
-        shutil.copy(ROOT / "templates/hermes/AGENTS.md", hermes / "AGENTS.md")
-        made.append(f"Hermes への指示文 {hermes / 'AGENTS.md'}")
+    if (hermes / "AGENTS.md").exists() and not (hermes / "hub.md").exists():  # 以前の名前。AGENTS.md だと Hermes が会話の始まりに一度だけ読んでしまう
+        (hermes / "AGENTS.md").rename(hermes / "hub.md")
+    if not (hermes / "hub.md").exists():
+        shutil.copy(ROOT / "templates/hermes/hub.md", hermes / "hub.md")
+        made.append(f"Hermes への指示文 {hermes / 'hub.md'}")
     shutil.copy(ROOT / "hubctl", hermes / "hubctl")  # コンテナからは本体のフォルダが見えないので、毎回写す（ハブと同じ道具）
     (hermes / "hubctl").chmod(0o755)
     for stale in ("hubread",):  # 以前の読むだけの道具
@@ -286,7 +288,7 @@ def cmd_start(restart: bool = False) -> int:
     print()
     print_checks(api("/api/doctor", timeout=60))
     brain = _config_value(CONFIG / "config.env", "VL_HUB").lower()
-    guide = CONFIG / ("hermes/AGENTS.md" if brain == "hermes" else "hub/CLAUDE.md")
+    guide = CONFIG / ("hermes/hub.md" if brain == "hermes" else "hub/CLAUDE.md")
     print(f"\n設定: {CONFIG / 'config.env'}\nハブへの指示文: {guide}（書き換えてかまいません）" + ("\nハブの頭: Hermes（VL_HUB=hermes）" if brain == "hermes" else ""))
     return 0  # 手でやることが残っていても、起動そのものは済んでいる（herdr の記録を「失敗」にしない）
 

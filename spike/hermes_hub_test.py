@@ -94,6 +94,15 @@ check("ハブの起動は、立てずに使える判定", s.ensure_hub(), {"ok":
 s.hermes_problem = lambda: "止まっています"
 check("Hermes が居ないときは理由を返す", s.ensure_hub(), {"ok": False, "reason": "hermes", "detail": "止まっています"})
 
+# ---- 指示文は発言のたびに system として付く（書き換えが次の発言から効く）
+s.HERMES_DIR.mkdir(parents=True, exist_ok=True)
+(s.HERMES_DIR / "hub.md").write_text("ハブの決まり v1")
+check("指示文が system で先頭に付く", s.hermes_messages("やあ"), [{"role": "system", "content": "ハブの決まり v1"}, {"role": "user", "content": "やあ"}])
+(s.HERMES_DIR / "hub.md").write_text("ハブの決まり v2")
+check("書き換えは次の発言から効く", s.hermes_messages("やあ")[0]["content"], "ハブの決まり v2")
+(s.HERMES_DIR / "hub.md").unlink()
+check("指示文が無ければ発言だけ", s.hermes_messages("やあ"), [{"role": "user", "content": "やあ"}])
+
 # ---- 台帳
 check("発言が無いうちは最後の発言も無い", s.hub_human_turn(), None)
 t1 = say("全体どうなってる？", "3つ開いています")

@@ -243,7 +243,7 @@ docker run --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent config set API_
 docker run -it --rm -v ~/.hermes:/opt/data nousresearch/hermes-agent model
 ```
 
-`config.env` に、同じ鍵と、ハブの頭を書きます（鍵は `~/.hermes/.env` の `API_SERVER_KEY` と同じ値）。書いたら `restart` します。`start` か `restart` で、設定フォルダの `hermes/` に指示文 `AGENTS.md`、道具 `hubctl`、鍵 `hub_key`（コンテナからの接続に付ける。同じ値）が置かれます。
+`config.env` に、同じ鍵と、ハブの頭を書きます（鍵は `~/.hermes/.env` の `API_SERVER_KEY` と同じ値）。書いたら `restart` します。`start` か `restart` で、設定フォルダの `hermes/` に指示文 `hub.md`、道具 `hubctl`、鍵 `hub_key`（コンテナからの接続に付ける。同じ値）が置かれます。
 
 ```
 VL_HERMES_KEY=（同じ鍵）
@@ -265,7 +265,7 @@ docker run -d --name hermes --restart unless-stopped \
 ### 使い方と、スキルの確かめ方
 
 - 使い方はハブと同じです。気に入らなければ声で直します（「予定は要らない」「件数から言って」など）。会話は `VL_HERMES_SESSION`（既定 `voice-loop`）の名前で続くので、直したことは次の返事に効きます
-- 指示文（`hermes/AGENTS.md`）は会話の始まりに読まれます。書き換えたあと同じ会話を続けると、Hermes は前の指示文のまま動きます（2026-10-21 に確認）。書き換えたら `VL_HERMES_SESSION` を新しい名前にして `restart` してください。前の会話は Hermes 側に残ります
+- 指示文（`hermes/hub.md`）は、本体が発言のたびに読んで Hermes に渡します。書き換えは次の発言から効き、会話はそのまま続きます（`AGENTS.md` という名前にしないこと。Hermes はその名前のファイルを会話の始まりに一度だけ読み、以後は古いまま使い続けます。2026-10-21 に確認）
 - Hermes がスキルを書こうとすると、承認待ちになります（`skills.write_approval`）。確かめて採用します。`~/.hermes/skills` を git に入れておくと、何がいつ変わったかが残ります
 
 ```sh
@@ -295,7 +295,7 @@ docker exec -it hermes hermes --resume voice-loop
 
 herdr に更新の命令は無いので、入れ直します。設定フォルダはそのまま残ります。本体の場所や版が変わっていれば、次に herdr を起動したとき（または `start` のとき）に、常駐サービスが新しい本体に切り替わります。
 
-ハブへの指示文（設定フォルダの `hub/CLAUDE.md`。Hermes なら `hermes/AGENTS.md`）は、更新しても上書きされません。新しい版でひな形（`templates/hub/CLAUDE.md`・`templates/hermes/AGENTS.md`）が変わったときは、見比べて取り込み、ハブのタブを閉じて `start` してください（Hermes は次の発言から読み直します）。
+ハブへの指示文（設定フォルダの `hub/CLAUDE.md`。Hermes なら `hermes/hub.md`）は、更新しても上書きされません。新しい版でひな形（`templates/hub/CLAUDE.md`・`templates/hermes/hub.md`）が変わったときは、見比べて取り込み、ハブのタブを閉じて `start` してください（Hermes は次の発言から読み直します）。
 
 外すときは、`uninstall` で常駐の登録を外してから、herdr でプラグインを外します。設定フォルダは残るので、要らなければ手で消します。
 

@@ -106,7 +106,7 @@ HERMES_URL = os.environ.get("VL_HERMES_URL", "http://127.0.0.1:8642").rstrip("/"
 HERMES_KEY = os.environ.get("VL_HERMES_KEY", "")
 HERMES_SESSION = os.environ.get("VL_HERMES_SESSION", "voice-loop")
 HERMES_PANE = "hermes"  # 画面が話し相手を指す鍵。herdr の pane ではない
-HERMES_DIR = CONFIG_DIR / "hermes"  # Hermes への指示文（AGENTS.md）・道具（hubctl）・鍵。コンテナに /opt/voice-loop として読み取り専用で見せる
+HERMES_DIR = CONFIG_DIR / "hermes"  # Hermes への指示文（hub.md）・道具（hubctl）・鍵。コンテナに /opt/voice-loop として読み取り専用で見せる
 HUB_BRAIN = os.environ.get("VL_HUB", "claude").strip().lower()  # ハブの頭。claude（herdr の中の Claude Code）か hermes（コンテナの中の Hermes）
 HERMES_HUB = HUB_BRAIN == "hermes"
 HUB_MODEL = os.environ.get("VL_HUB_MODEL", "sonnet")
@@ -276,7 +276,7 @@ def hermes_problem() -> str:
         urllib.request.urlopen(f"{HERMES_URL}/health", timeout=5).read()
     except Exception:
         return f"Hermes の API サーバーが {HERMES_URL} で応答しません。コンテナを起動してください（README「Hermes をハブにする」）"
-    missing = [n for n in ("AGENTS.md", "hubctl", "hub_key") if not (HERMES_DIR / n).is_file()]
+    missing = [n for n in ("hub.md", "hubctl", "hub_key") if not (HERMES_DIR / n).is_file()]
     return f"Hermes への指示文・道具・鍵が揃っていません（{', '.join(missing)}）。プラグインの start を実行してください" if missing else ""
 
 
@@ -675,11 +675,18 @@ def hub_reply_to(turn: str | None) -> str:
     return reply_to(hub_log(), turn)
 
 
+def hermes_messages(text: str) -> list[dict]:
+    """Hermes へ送る messages。指示文（hub.md）は発言のたびに読んで system として付ける。
+    会話の始まりに一度だけ読まれる AGENTS.md と違い、書き換えが次の発言から効く（同じ会話を続けたまま）。"""
+    guide = (HERMES_DIR / "hub.md").read_text().strip() if (HERMES_DIR / "hub.md").is_file() else ""
+    return ([{"role": "system", "content": guide}] if guide else []) + [{"role": "user", "content": text}]
+
+
 def ask_hermes(text: str) -> str:
     """Hermes の API サーバー（OpenAI 互換）に送り、返事を待つ。X-Hermes-Session-Id で同じ会話を続ける。"""
     req = urllib.request.Request(
         f"{HERMES_URL}/v1/chat/completions",
-        data=json.dumps({"model": "hermes-agent", "messages": [{"role": "user", "content": text}], "stream": False}).encode(),
+        data=json.dumps({"model": "hermes-agent", "messages": hermes_messages(text), "stream": False}).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {HERMES_KEY}", "X-Hermes-Session-Id": HERMES_SESSION},
         method="POST")
     t0 = time.monotonic()
