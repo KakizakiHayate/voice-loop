@@ -136,7 +136,9 @@ function applyTarget() {
   $('typed').disabled = !ok;
   // Mac に届かない間と、声がまだ決まっていない間は送れない（打ちかけの文は残る）
   $('talk').disabled = $('send').disabled = !ok || !linked() || !$('speaker').value;
+  const shown = $('statusText').textContent;
   if (!ok && linked()) setStatus('話し相手を選んでください');
+  else if (ok && linked() && (shown === '話し相手を選んでください' || shown === UNREACHABLE)) setStatus('準備できました'); // つながったあとで一覧が届いたとき
 }
 async function loadAgents() {
   let list; try { list = await (await fetch('/api/agents')).json(); } catch { return; }
