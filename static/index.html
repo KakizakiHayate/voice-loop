@@ -134,7 +134,8 @@ let setupChecked = false; // 開いてから一度は、準備の残りを確か
 function applyTarget() {
   const ok = !!$('agent').value;
   $('typed').disabled = !ok;
-  $('talk').disabled = $('send').disabled = !ok || !linked(); // Mac に届かない間は送れない（打ちかけの文は残る）
+  // Mac に届かない間と、声がまだ決まっていない間は送れない（打ちかけの文は残る）
+  $('talk').disabled = $('send').disabled = !ok || !linked() || !$('speaker').value;
   if (!ok && linked()) setStatus('話し相手を選んでください');
 }
 async function loadAgents() {
@@ -192,7 +193,7 @@ async function loadSpeakers() {
   for (const s of sp) { const o = document.createElement('option'); o.value = s.id; o.textContent = s.name; sel.appendChild(o); }
   const saved = localStorage.getItem('vl.speaker'), def = sp.find(s => s.default);
   if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved; else if (def) sel.value = def.id; // 覚えている声が無い（エンジンを替えた直後など）なら既定の声
-  hello(); // つながったあとで一覧が届いたときも、選んでいる声をサーバーに知らせる
+  hello(); applyTarget(); // つながったあとで一覧が届いたときも、選んでいる声をサーバーに知らせ、送れるようにする
 }
 const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value })); } catch {} }; // ハブからの報告を、選んでいる声で届けてもらう
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
@@ -256,10 +257,11 @@ function connect() {
   const sock = ws, giveUp = setTimeout(() => { if (sock.readyState === 0) sock.close(); }, 5000); // 通信が止まって待たされるときは見切る
   ws.onopen = () => {
     clearTimeout(giveUp); $('conn').classList.add('on'); setStatus('準備できました'); applyTarget(); hello(); clog('connected ' + navigator.userAgent);
-    if (away) { away = false; catchUp(); }
+    if (away || !agentsSig || !$('speaker').options.length) { away = false; catchUp(); } // 起動時に読めなかったものも取り直す
   };
   ws.onclose = () => {
     clearTimeout(giveUp); if (sock !== ws) return;
+    if (rec && rec.state === 'recording') stopRec(); // 話している途中なら止めてマイクを離す（送らずに捨てる）
     $('conn').classList.remove('on'); away = true; applyTarget(); setStatus(UNREACHABLE); retry = setTimeout(connect, 2000);
   };
   ws.onmessage = async ev => {
@@ -297,6 +299,7 @@ async function startRec() {
   let stream;
   try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
   catch (e) { setSession('auto'); stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  if (!linked()) { stream.getTracks().forEach(t => t.stop()); setSession('playback'); setStatus(UNREACHABLE); return; } // マイクの許可を待つ間に届かなくなった
   for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) if (MediaRecorder.isTypeSupported(m)) { mime = m; break; }
   ext = mime.includes('mp4') ? 'mp4' : 'webm';
   rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);

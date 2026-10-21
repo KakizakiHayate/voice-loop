@@ -3,7 +3,8 @@
 //
 // 取り方: まず Mac に取りに行き、取れたら手元の写しも新しくする。3秒で返ってこないとき（通信が止まって
 // 待たされるとき）と、取れなかったときだけ、手元の写しで答える。更新したのに古い画面が出続けることを避けるため。
-// /api と /ws には手を出さない（一覧や会話を古い写しで答えない）。
+// 扱うのは画面（/ を開く操作）と SHELL のファイルだけ。/api と /ws には手を出さない（一覧や会話を古い写しで答えない）。
+// 写しに残すのは、転送されていない 200 だけ（ほかのページへの転送や失敗の応答を、画面として残さない）。
 const CACHE = 'voice-loop-shell-v1';
 const SHELL = [
   '/',
@@ -16,9 +17,14 @@ const SHELL = [
   '/static/icons/icon-512.png',
 ];
 const WAIT_MS = 3000;
+const keepable = res => res.status === 200 && !res.redirected;
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE)
+    .then(c => Promise.all(SHELL.map(path => fetch(path, { cache: 'no-cache' })
+      .then(res => (keepable(res) ? c.put(path, res) : null))
+      .catch(() => null)))) // 取れなかったファイルは、次に開いたときに写す
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', e => {
@@ -30,12 +36,11 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  const page = e.request.mode === 'navigate';
-  if (!page && !SHELL.includes(url.pathname)) return; // /api などは素通し
-  const key = page ? '/' : url.pathname;
+  if (!SHELL.includes(url.pathname)) return; // /api など、画面の部品でないものは素通し（/api を直接開いた場合も）
+  const key = url.pathname;
   let saved = Promise.resolve();
   const net = fetch(e.request).then(res => {
-    if (res.ok && !res.redirected) {
+    if (keepable(res)) {
       const copy = res.clone();
       saved = caches.open(CACHE).then(c => c.put(key, copy));
     }
