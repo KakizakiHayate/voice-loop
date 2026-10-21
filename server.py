@@ -1150,7 +1150,7 @@ def _asked(pane: str, key: str) -> tuple[dict | None, dict]:
     """画面が指している相手の、いま止まっている問い。(相手, 問い)。問いの kind は
     permission（許可・断る）/ question（選択式。断るだけ）/ trust（端末で答える）/ unknown / none（止まっていない）/ unreadable / gone。"""
     a = next((a for a in list_agents() if a["pane"] == pane), None)
-    if not a or (key and agent_key(a) != key):  # 開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居る
+    if not a or not key or agent_key(a) != key:  # key は必須。開きっぱなしの画面の一覧が古く、同じ場所に別のセッションが居ることがある
         return None, {"kind": "gone"}
     if a["status"] != "blocked":
         return a, {"kind": "none"}
@@ -1167,13 +1167,26 @@ def api_prompt(pane: str, key: str = ""):
     return JSONResponse(_asked(pane, key)[1])
 
 
+_answer_lock = asyncio.Lock()  # 確かめてからキーを送るまでを、一度にひとつだけにする
+ANSWERED: dict[str, tuple[str, float]] = {}  # 画面のボタンで答えた問い: pane → (指紋, 時刻)
+ANSWERED_HOLD = 15  # 答えたあと、相手の状態が変わるまでのあいだ、同じ問いへの重ねた答えを断る秒数
+
+
 @app.post("/api/answer")
 async def api_answer(body: dict):
     """画面のボタンで、止まっているセッションの問いに答える。
     守ること: 画面に出したのと同じ問いにだけ答える（指紋で確かめる）。許可は「今回だけ」（1）で、「今後は聞かずに許可」は選ばない。
-    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。フォルダの信頼の確認には答えない。"""
+    取り消しにくい操作に見えるときは、もう一度押してから（confirmed）。フォルダの信頼の確認には答えない。同じ問いに二度答えない。"""
+    async with _answer_lock:
+        return await _answer(body)
+
+
+async def _answer(body: dict):
     pane, key, fp = str(body.get("pane", "")), str(body.get("key", "")), str(body.get("fp", ""))
     choice, confirmed = str(body.get("choice", "")), bool(body.get("confirmed"))
+    done = ANSWERED.get(pane)
+    if done and done[0] == fp and time.time() - done[1] < ANSWERED_HOLD:  # 二度押し・重ねた送信
+        return JSONResponse({"ok": False, "reason": "answered"})
     a, asked = await asyncio.to_thread(_asked, pane, key)
     if asked["kind"] in ("gone", "none", "unreadable", "trust"):
         return JSONResponse({"ok": False, "reason": asked["kind"]})
@@ -1189,7 +1202,10 @@ async def api_answer(body: dict):
         return JSONResponse({"ok": False, "reason": "bad_choice", "kind": asked["kind"]})
     r = await asyncio.to_thread(herdr, "agent", "send-keys", pane, keys)
     hlog(f"answer(画面) → {pane} ({a['cwd'].rsplit('/', 1)[-1]}): {said} {'ok' if 'result' in r else 'ERR'}", flush=True)
-    return JSONResponse({"ok": True, "said": said} if "result" in r else {"ok": False, "reason": "herdr"})
+    if "result" not in r:
+        return JSONResponse({"ok": False, "reason": "herdr"})
+    ANSWERED[pane] = (fp, time.time())
+    return JSONResponse({"ok": True, "said": said})
 
 
 # ---------- セッションの起動 ----------

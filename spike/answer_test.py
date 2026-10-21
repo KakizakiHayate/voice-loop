@@ -51,8 +51,11 @@ def prompt(key="sess-1"):
     return json.loads(s.api_prompt("w9:p1", key).body)
 
 
-def answer(**body):
+def answer(keep=False, **body):
+    """keep=False なら、前に答えた記録を消してから送る（答えたあと相手の画面が変わった、の代わり）。"""
     state["sent"].clear()
+    if not keep:
+        s.ANSWERED.clear()
     r = json.loads(asyncio.run(s.api_answer({"pane": "w9:p1", "key": "sess-1", **body})).body)
     return r, list(state["sent"])
 
@@ -96,9 +99,28 @@ r, sent = answer(fp="0" * 40, choice="allow")
 check("画面が変わったら送らない", (r["ok"], r["reason"], sent), (False, "changed", []))
 r, sent = answer(fp=fp, choice="always")
 check("知らない答えは送らない", (r["reason"], sent), ("bad_choice", []))
+for name, key in (("別のセッション", "sess-2"), ("key が空", ""), ("key が無い", None)):
+    state["sent"].clear()
+    s.ANSWERED.clear()
+    req = {"pane": "w9:p1", "fp": fp, "choice": "allow", **({} if key is None else {"key": key})}
+    r = json.loads(asyncio.run(s.api_answer(req)).body)
+    check(f"{name}には送らない", (r["reason"], state["sent"]), ("gone", []))
+check("問いの読み取りも key が要る", prompt(""), {"kind": "gone"})
+
+# 二度押し・重ねた送信
+answer(fp=fp, choice="allow")
+r, sent = answer(keep=True, fp=fp, choice="allow")
+check("同じ問いへの二度目は送らない", (r["reason"], sent), ("answered", []))
+r, sent = answer(keep=True, fp=fp, choice="deny")
+check("同じ問いに、続けて断るも送らない", (r["reason"], sent), ("answered", []))
+
+
+async def both():
+    return await asyncio.gather(*(s.api_answer({"pane": "w9:p1", "key": "sess-1", "fp": fp, "choice": "allow"}) for _ in range(2)))
 state["sent"].clear()
-r = json.loads(asyncio.run(s.api_answer({"pane": "w9:p1", "key": "sess-2", "fp": fp, "choice": "allow"})).body)
-check("別のセッションには送らない", (r["reason"], state["sent"]), ("gone", []))
+s.ANSWERED.clear()
+rs = sorted(json.loads(r.body).get("reason", "ok") for r in asyncio.run(both()))
+check("同時に2つ届いても、送るのは1回", (rs, state["sent"]), (["answered", "ok"], ["1"]))
 
 case("取り消しにくい許可", screen=RISKY)
 fp = prompt()["fp"]

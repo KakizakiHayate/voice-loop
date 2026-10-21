@@ -187,7 +187,7 @@ async function showSetup(seq) {
   sys(`準備があと ${todo.length} つ残っています。`);
   todo.forEach((c, i) => sys(`${i + 1}. ${c.name}: ${c.todo}`));
 }
-$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); loadAsk(); };
+$('agent').onchange = () => { localStorage.setItem(WANT, curKey()); shownPane = $('agent').value; applyTarget(); setStatus(linked() ? '準備できました' : UNREACHABLE); loadThread(); showAsk(null); loadAsk(); };
 
 // ---------- 承認・質問への返答（ボタン） ----------
 // 選んでいる相手が承認や質問で止まっていれば、何を聞かれているかと「許可（今回だけ）」「断る」を出す。
@@ -201,14 +201,18 @@ const ANSWER_FAIL = {
   changed: '画面が変わりました。出し直したので、確かめてから押してください', none: 'もう止まっていません',
   gone: '話し相手が入れ替わっています。選び直してください', trust: 'フォルダの信頼は端末で答えてください',
   unreadable: '画面を読めませんでした', confirm: 'もう一度押してください', unreachable: '接続できません', herdr: 'herdr が応答しません',
-  bad_choice: 'この問いには、そのボタンでは答えられません',
+  bad_choice: 'この問いには、そのボタンでは答えられません', answered: 'もう答えています',
 };
-let asked = null, askSeq = 0, armed = null, followTimer = null;
+// asked は、出している問いと、それがどの相手（pane・key）のものか。答えるときは、選んでいる相手と一致するかを確かめる
+let asked = null, askSeq = 0, armed = null, answering = false, followTimer = null;
+const sameAgent = (a, p) => !!a && !!p && a.pane === p.pane && a.key === p.key;
 async function loadAsk() {
+  if (answering) return; // 送っている途中は出し直さない（ボタンが押せる状態に戻って、二重に送るのを防ぐ）
   const a = curAgent(), seq = ++askSeq;
+  if (!sameAgent(a, asked)) showAsk(null); // 別の相手の問いと「もう一度押すと許可」を残さない
   if (!a || a.status !== 'blocked') { showAsk(null); return; }
   let p; try { p = await (await fetch(`/api/prompt?pane=${encodeURIComponent(a.pane)}&key=${encodeURIComponent(a.key)}`)).json(); } catch { return; }
-  if (seq === askSeq) showAsk(p.kind === 'none' || p.kind === 'gone' ? null : p);
+  if (seq === askSeq && !answering && sameAgent(curAgent(), a)) showAsk(p.kind === 'none' || p.kind === 'gone' ? null : { ...p, pane: a.pane, key: a.key });
 }
 function showAsk(p) {
   asked = p; disarm();
@@ -218,19 +222,22 @@ function showAsk(p) {
   $('askText').textContent = p.text || ''; $('askText').hidden = !p.text;
   $('allow').hidden = p.kind !== 'permission';
   $('deny').hidden = !(p.kind === 'permission' || p.kind === 'question');
-  $('allow').disabled = $('deny').disabled = false;
+  $('allow').disabled = $('deny').disabled = answering;
 }
 function disarm() { clearTimeout(armed); armed = null; $('allow').textContent = '許可（今回だけ）'; $('allow').classList.remove('warn'); }
 async function answer(choice) {
-  const a = curAgent(); if (!asked || !a) return;
-  if (choice === 'allow' && asked.risky && !armed) { armed = setTimeout(disarm, 4000); $('allow').textContent = 'もう一度押すと許可'; $('allow').classList.add('warn'); return; }
+  const q = asked;
+  if (!q || answering) return;
+  if (!sameAgent(curAgent(), q)) { showAsk(null); loadAsk(); return; } // 出している問いが、選んでいる相手のものでない
+  if (choice === 'allow' && q.risky && !armed) { armed = setTimeout(disarm, 4000); $('allow').textContent = 'もう一度押すと許可'; $('allow').classList.add('warn'); return; }
   const confirmed = !!armed; disarm();
-  $('allow').disabled = $('deny').disabled = true; // 二重に送らない
-  let r; try { r = await (await fetch('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: a.pane, key: a.key, fp: asked.fp, choice, confirmed }) })).json(); }
+  answering = true; $('allow').disabled = $('deny').disabled = true; // 二重に送らない
+  let r; try { r = await (await fetch('/api/answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pane: q.pane, key: q.key, fp: q.fp, choice, confirmed }) })).json(); }
   catch { r = { ok: false, reason: 'unreachable' }; }
+  answering = false;
   if (r.ok) { showAsk(null); setStatus(choice === 'allow' ? '許可しました。続きを待っています…' : '断りました'); follow(); return; }
   sys('⚠ 答えを送れませんでした: ' + (ANSWER_FAIL[r.reason] || r.reason));
-  loadAsk();
+  showAsk(null); loadAsk();
 }
 $('allow').onclick = () => answer('allow');
 $('deny').onclick = () => answer('deny');
