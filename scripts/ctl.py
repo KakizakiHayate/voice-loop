@@ -273,7 +273,7 @@ def print_checks(doc: dict | None) -> bool:
 def cmd_start(restart: bool = False) -> int:
     if OFF.exists() or PENDING.exists():  # start / restart は「動かしたい」なので、off にしてあれば（戻し残しがあれば）on にする
         print("voice-loop は off になっていたので、on にします。" if OFF.exists() else "前の on で戻しきれなかったものを、もう一度戻します。")
-        return cmd_on()
+        return cmd_on(restart)
     return _start(restart)
 
 
@@ -326,33 +326,53 @@ def cmd_stop() -> int:
 
 
 # ---------- off / on（メモリを空ける） ----------
-def _load(path: Path, keep_broken: bool = False) -> tuple[dict, str]:
-    """off の印・戻し残しの記録を読む。(記録, 問題)。無ければ空。壊れていれば空とし、keep_broken なら控えを残す。"""
-    if not path.exists():
-        return {}, ""
+def _read(path: Path) -> dict | None:
+    """記録を読んで、形を確かめる。読めないか形が違えば None。"""
     try:
         d = json.loads(path.read_text())
     except (OSError, ValueError):
-        d = None
+        return None
     names = lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)
+    policies = d.get("policies", {}) if isinstance(d, dict) else None
     if (isinstance(d, dict) and isinstance(d.get("since", ""), str) and names(d.get("containers", [])) and names(d.get("services", []))
-            and isinstance(d.get("policies", {}), dict) and all(isinstance(v, str) for v in d.get("policies", {}).values())):
-        return d, ""
+            and isinstance(policies, dict) and all(isinstance(v, str) for v in policies.values())):
+        return d
+    return None
+
+
+def _load(path: Path, keep_broken: bool = False) -> tuple[dict, str, bool]:
+    """off の印・戻し残しの記録を読む。(記録, 知らせること, 中身を確かめられたか)。無ければ ({}, "", True)。
+    壊れていれば、ひとつ前の控え（.bak）から読む。控えも読めなければ中身は分からない（推測で埋めない）。
+    keep_broken なら、壊れていたものの写しを残す。"""
+    if not path.exists():
+        return {}, "", True
+    d = _read(path)
+    if d is not None:
+        return d, "", True
     kept = ""
     if keep_broken:
         kept = STATE / f"{path.name}-broken-{time.strftime('%Y%m%d-%H%M%S')}"
         shutil.copy(path, kept)
-    return {}, f"記録 {path} が壊れていて読めませんでした" + (f"（控え: {kept}）" if kept else "")
+    why = f"記録 {path} が壊れていて読めませんでした" + (f"（写し: {kept}）" if kept else "")
+    bak = _read(path.with_name(path.name + ".bak"))
+    return (bak, why + "。ひとつ前の控えから読みました", True) if bak is not None else ({}, why, False)
 
 
 def _save(path: Path, rec: dict) -> None:
-    """途中で切れても壊れた記録が残らないよう、別名に書いてから置き換える。"""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(rec, ensure_ascii=False) + "\n")
-    tmp.replace(path)
+    """記録を書く。途中で切れても壊れた記録が残らないよう別名に書いてから置き換え、同じ中身の控え（.bak）も置く。"""
+    text = json.dumps(rec, ensure_ascii=False) + "\n"
+    for target in (path, path.with_name(path.name + ".bak")):
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(target)
 
 
-def _merge(*lists: list[str]) -> list[str]:
+def _drop(path: Path) -> None:
+    for target in (path, path.with_name(path.name + ".bak")):
+        target.unlink(missing_ok=True)
+
+
+def _merge(*lists) -> list[str]:
     return list(dict.fromkeys(x for items in lists for x in items))
 
 
@@ -383,27 +403,28 @@ def _why(r: subprocess.CompletedProcess) -> str:
 NO_DOCKER = "docker が見つからないので、コンテナ（{}）を{}られませんでした"
 
 
-def containers_off(names: list[str], policies: dict) -> tuple[list[str], dict]:
-    """コンテナを止める。(問題, 再起動の設定の記録)。
-    再起動の設定が always のものは、手で止めても Docker が立ち上がり直すと戻るので、unless-stopped に替えてから止め、元の設定を記録する。"""
+def containers_off(rec: dict) -> list[str]:
+    """off の記録にあるコンテナを止める。問題を返す。
+    再起動の設定が always のものは、手で止めても Docker が立ち上がり直すと戻るので、unless-stopped に替えてから止める。
+    元の設定は、替える前に記録に書いておく（替えた直後に途切れても、on で戻せるように）。"""
     problems = []
-    for name in names:
+    for name in rec["containers"]:
         r = docker("inspect", "-f", "{{.HostConfig.RestartPolicy.Name}}", name)
         if r is None:
-            return [NO_DOCKER.format("、".join(names), "止め")], policies
+            return [NO_DOCKER.format("、".join(rec["containers"]), "止め")]
         if r.returncode:
             problems.append(f"コンテナ {name} を止められませんでした: {_why(r)}")
             continue
         if r.stdout.strip() == "always":
+            rec["policies"][name] = "always"
+            _save(OFF, rec)
             u = docker("update", "--restart", "unless-stopped", name)
             if u.returncode:
                 problems.append(f"コンテナ {name} の再起動の設定を替えられませんでした。Mac を再起動すると戻ります: {_why(u)}")
-            else:
-                policies = {**policies, name: "always"}
         s = docker("stop", name)
         if s.returncode:
             problems.append(f"コンテナ {name} を止められませんでした: {_why(s)}")
-    return problems, policies
+    return problems
 
 
 def containers_on(names: list[str], policies: dict) -> tuple[list[str], list[str], dict]:
@@ -458,29 +479,34 @@ def services_on(labels: list[str]) -> tuple[list[str], list[str]]:
     return problems, failed
 
 
+def _records() -> tuple[dict, dict, list[str], bool]:
+    """off の記録と戻し残しの記録。(off, 戻し残し, 知らせること, 両方とも中身を確かめられたか)。"""
+    rec, note1, ok1 = _load(OFF, keep_broken=True)
+    pend, note2, ok2 = _load(PENDING, keep_broken=True)
+    return rec, pend, [n for n in (note1, note2) if n], ok1 and ok2
+
+
 def cmd_off() -> int:
     """メモリを空けるために止める。本体と、config.env で指定した部品を止め、on するまで、herdr や Mac を再起動しても上げない。
     サーバーのメモリ上にある、頼んだ件の見張りはここで消える。"""
-    rec, broken = _load(OFF, keep_broken=True)
-    pend, broken2 = _load(PENDING, keep_broken=True)
-    problems = [p for p in (broken, broken2) if p]
+    rec, pend, problems, _ = _records()
     want_c, want_s = configured()
+    policies = {**pend.get("policies", {}), **rec.get("policies", {})}
     rec = {"since": rec.get("since") or time.strftime("%Y-%m-%d %H:%M"),  # もう一度 off しても、止めた時刻は最初のまま
-           "containers": _merge(rec.get("containers", []), pend.get("containers", []), want_c),
+           # 戻し残し（再起動の設定だけを戻せなかったコンテナも）は、off の記録に移して止める
+           "containers": _merge(rec.get("containers", []), pend.get("containers", []), policies, want_c),
            "services": _merge(rec.get("services", []), pend.get("services", []), want_s),
-           "policies": {**pend.get("policies", {}), **rec.get("policies", {})}}
+           "policies": policies}
     STATE.mkdir(parents=True, exist_ok=True)
-    _save(OFF, rec)  # 先に印を置く（降ろす途中で startup が上げ直さないように）。戻し残しは off の記録に移す
-    PENDING.unlink(missing_ok=True)
+    _save(OFF, rec)  # 先に印を置く（降ろす途中で startup が上げ直さないように）
+    _drop(PENDING)
     if loaded():
         bring_down()
     if loaded():
         problems.append("本体を降ろせませんでした（動いたままです）")
     if PLIST.exists():
         PLIST.replace(STATE / "plist-while-off.plist")  # ログインしたときに上がらないよう外す。on で作り直す
-    more, rec["policies"] = containers_off(rec["containers"], rec["policies"])
-    _save(OFF, rec)
-    problems += more + services_off(rec["services"])
+    problems += containers_off(rec) + services_off(rec["services"])
     print("voice-loop を off にしました。on にするまで、herdr や Mac を再起動しても上がりません。")
     print("止めたもの: " + "、".join(["本体", *(f"コンテナ {c}" for c in rec["containers"]), *rec["services"]]))
     if not rec["containers"] and not rec["services"]:
@@ -491,28 +517,27 @@ def cmd_off() -> int:
     return 1 if problems else 0
 
 
-def cmd_on() -> int:
+def cmd_on(restart: bool = False) -> int:
     """off で止めたもの（と、前の on で戻しきれなかったもの）を上げ直し、本体を起動する（start と同じ用意と点検まで）。
-    off していなければ、本体を起動するだけ（設定に書いてあっても、止めていない部品には触れない）。"""
-    rec, broken = _load(OFF, keep_broken=True)
-    pend, broken2 = _load(PENDING, keep_broken=True)
-    problems = [p for p in (broken, broken2) if p]
+    戻すのは記録にあるものだけ。off していなければ本体を起動するだけで、設定に書いてあっても止めていない部品には触れない。"""
+    rec, pend, problems, known = _records()
     containers = _merge(rec.get("containers", []), pend.get("containers", []))
     services = _merge(rec.get("services", []), pend.get("services", []))
     policies = {**pend.get("policies", {}), **rec.get("policies", {})}
-    if broken or broken2:  # 何を止めたか分からない。いちばん近い手がかりとして、設定に書いてある部品を戻す
+    if not known:  # 何を止めたか分からない。推測で上げると、止めていないものを上げてしまうので、上げずに知らせる
         want_c, want_s = configured()
-        containers, services = _merge(containers, want_c), _merge(services, want_s)
-        problems.append("記録の代わりに、config.env に書いてある部品を戻しました")
+        candidates = [*(f"コンテナ {c}" for c in want_c), *want_s]
+        problems.append("何を止めたか確かめられないので、記録にない部品は戻していません"
+                        + (f"。config.env にあるもの（{'、'.join(candidates)}）が止まったままなら、手で戻してください" if candidates else ""))
     p1, failed_s = services_on(services)
     p2, failed_c, left = containers_on(containers, policies)
     problems += p1 + p2
     if failed_s or failed_c or left:
         _save(PENDING, {"containers": failed_c, "services": failed_s, "policies": left})  # 次の on で、もう一度戻す
     else:
-        PENDING.unlink(missing_ok=True)
-    OFF.unlink(missing_ok=True)
-    rc = _start(settle=90 if containers or services else 0)  # 声のエンジンなどが応答し始めるまで、点検を待つ
+        _drop(PENDING)
+    _drop(OFF)
+    rc = _start(restart, settle=90 if containers or services else 0)  # 声のエンジンなどが応答し始めるまで、点検を待つ
     for p in problems:
         print("⚠ " + p)
     if failed_s or failed_c or left:
@@ -608,7 +633,7 @@ def cmd_startup() -> int:
 
 
 COMMANDS = {
-    "start": cmd_start, "stop": cmd_stop, "restart": lambda: cmd_start(restart=True), "on": cmd_on, "off": cmd_off,
+    "start": cmd_start, "stop": cmd_stop, "restart": lambda: cmd_start(restart=True), "on": lambda: cmd_on(), "off": cmd_off,
     "status": cmd_status, "url": cmd_url, "doctor": cmd_doctor, "uninstall": cmd_uninstall, "startup": cmd_startup,
 }
 

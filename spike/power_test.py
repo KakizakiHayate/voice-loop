@@ -81,6 +81,8 @@ def fake_docker(*args):
     if verb == "inspect":
         return done(out=world["policy"][name] + "\n")
     if verb == "update":
+        if args[2] == "unless-stopped" and ctl.OFF.exists():  # 替える瞬間に、元の設定がもう記録にあるか
+            world["seen"] = json.loads(ctl.OFF.read_text()).get("policies", {})
         world["policy"][name] = args[2]
     elif verb in ("start", "stop"):
         (world["running"].add if verb == "start" else world["running"].discard)(name)
@@ -233,7 +235,7 @@ for broken in ("これは JSON ではない", "[]", "null", '{"containers": null
         f.unlink()
     check(f"壊れた off の記録 {broken!r} でも status は落ちない", run("status")[0], 0)
     rc, out = run("on")
-    check(f"壊れた off の記録 {broken!r}: on は落ちず、控えを残し、設定の部品を戻して知らせる",
+    check(f"壊れた off の記録 {broken!r}: on は落ちず、壊れた記録の写しを残し、ひとつ前の控えから戻して知らせる",
           (rc, len(list(ctl.STATE.glob("off-broken-*"))), "aivis" in world["running"], up(), ctl.OFF.exists(), "壊れていて" in out), (1, 1, True, True, False, True))
 
 # 再起動の設定が always のコンテナも、off の間は止まったまま（指摘5）
@@ -241,11 +243,55 @@ world["policy"]["aivis"] = "always"
 rc, out = run("off")
 check("always のコンテナは、unless-stopped に替えてから止め、元の設定を記録する",
       (rc, world["policy"]["aivis"], json.loads(ctl.OFF.read_text())["policies"]), (0, "unless-stopped", {"aivis": "always"}))
+check("元の設定は、替える前に記録に書いてある（第2回の任意4）", world.get("seen"), {"aivis": "always"})
 login()
 check("always だったコンテナも、Mac を再起動して止まったまま", "aivis" in world["running"], False)
 rc, out = run("on")
 check("on で上げて、再起動の設定を always に戻す", (rc, "aivis" in world["running"], world["policy"]["aivis"]), (0, True, "always"))
+
+# 再起動の設定だけを戻しきれなかったコンテナも、次の off で止める（第2回の指摘2）
+run("off")
+world["fail"] = {("update", "aivis")}
+rc, out = run("on")
+check("on: 上げられたが再起動の設定を戻せなかったものは、設定だけ戻し残しに残す",
+      (rc, "aivis" in world["running"], json.loads(ctl.PENDING.read_text())), (1, True, {"containers": [], "services": [], "policies": {"aivis": "always"}}))
+world["fail"] = set()
+set_env("")
+rc, out = run("off")
+check("その戻し残しのあるコンテナは、設定から消しても次の off で止める", (rc, "aivis" in world["running"]), (0, False))
+rc, out = run("on")
+check("そして on で上げ、always に戻す", (rc, "aivis" in world["running"], world["policy"]["aivis"], ctl.PENDING.exists()), (0, True, "always", False))
 world["policy"]["aivis"] = "unless-stopped"
+
+# 記録が壊れたら、控えから戻す。控えも読めなければ、推測で上げない（第2回の指摘1）
+set_env("VL_OFF_CONTAINERS=aivis\n")
+run("off")
+world["running"].discard("hermes")  # 利用者が自分で止めている
+set_env("VL_OFF_CONTAINERS=hermes\n")  # off のあとで設定を別の部品に替えた
+ctl.OFF.write_text("壊れた")
+rc, out = run("on")
+check("記録が壊れても、控えから止めたもの（aivis）を戻し、設定にあるだけのもの（hermes）は上げない",
+      (rc, "aivis" in world["running"], "hermes" in world["running"], "控えから読みました" in out), (1, True, False, True))
+set_env("VL_OFF_CONTAINERS=aivis\n")
+run("off")
+set_env("VL_OFF_CONTAINERS=hermes\n")
+ctl.OFF.write_text("壊れた")
+ctl.OFF.with_name("off.bak").write_text("これも壊れた")
+rc, out = run("on")
+check("控えも読めなければ、どのコンテナも上げず、本体は上げて、手で戻す候補を知らせる",
+      (rc, "aivis" in world["running"], "hermes" in world["running"], up(), "手で戻してください" in out, "コンテナ hermes" in out, ctl.OFF.exists()),
+      (1, False, False, True, True, True, False))
+world["running"] |= {"aivis", "hermes"}
+
+# 戻し残しがあっても、restart は本体を再起動する（第2回の指摘3）
+set_env("VL_OFF_CONTAINERS=aivis\n")
+run("off")
+world["docker"] = False
+run("on")  # 戻し残しができ、本体は上がっている
+world["docker"] = True
+rc, out = run("restart")
+check("戻し残しがあるときの restart も、戻し残しを戻したうえで本体を再起動する",
+      (rc, ("launchctl", "kickstart", "-k", f"{ctl.DOMAIN}/{ctl.LABEL}") in calls, "aivis" in world["running"], ctl.PENDING.exists()), (0, True, True, False))
 
 bad = [f"{name}: {g!r}（期待 {w!r}）" for name, ok, g, w in results if not ok]
 print("\n".join(bad) or f"{len(results)} 例、すべて期待どおり")
