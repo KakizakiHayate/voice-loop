@@ -34,17 +34,22 @@ ctl.phone_url = lambda: None
 WHISPER = "local.whisper-server"
 AGENTS = TMP / "home/Library/LaunchAgents"
 (AGENTS / f"{WHISPER}.plist").write_text("whisper")
-world = {"loaded": {WHISPER}, "disabled": set(), "running": {"aivis", "hermes"}, "docker": True, "doctor_ng": 0}
+world = {"loaded": {WHISPER}, "disabled": set(), "running": {"aivis", "hermes"}, "docker": True, "doctor_ng": 0,
+         "policy": {"aivis": "unless-stopped", "hermes": "unless-stopped"}, "fail": set()}  # fail: 失敗させる (命令, 相手)
 calls = []
 
 
-def done(rc=0, err=""):
-    return subprocess.CompletedProcess([], rc, "", err)
+def done(rc=0, err="", out=""):
+    return subprocess.CompletedProcess([], rc, out, err)
 
 
 def fake_launchctl(*args):
     calls.append(("launchctl", *args))
     verb, label = args[0], args[-1].rsplit("/", 1)[-1]
+    if verb == "bootstrap":
+        label = Path(args[-1]).stem
+    if (verb, label) in world["fail"]:
+        return done(1, f"{verb} failed: Operation not permitted")
     if verb == "print":
         return done(0 if label in world["loaded"] else 113)
     if verb == "bootout":
@@ -52,7 +57,6 @@ def fake_launchctl(*args):
         world["loaded"].discard(label)
         return done(0 if hit else 3)
     if verb == "bootstrap":
-        label = Path(args[-1]).stem
         if label in world["disabled"]:
             return done(5, "Bootstrap failed: 5: Input/output error")
         world["loaded"].add(label)
@@ -67,12 +71,20 @@ def fake_docker(*args):
     calls.append(("docker", *args))
     if not world["docker"]:
         return None
-    verb, names = args[0], args[1:]
-    missing = [n for n in names if n not in ("aivis", "hermes")]
-    for n in names:
-        if n not in missing:
-            (world["running"].discard if verb == "stop" else world["running"].add)(n)
-    return done(1, f"Error response from daemon: No such container: {missing[0]}") if missing else done()
+    verb, name = args[0], args[-1]
+    if verb == "version":
+        return done(out="27.0.0")
+    if name not in world["policy"]:
+        return done(1, f"Error response from daemon: No such container: {name}")
+    if (verb, name) in world["fail"]:
+        return done(1, f"Error response from daemon: {verb} failed for {name}")
+    if verb == "inspect":
+        return done(out=world["policy"][name] + "\n")
+    if verb == "update":
+        world["policy"][name] = args[2]
+    elif verb in ("start", "stop"):
+        (world["running"].add if verb == "start" else world["running"].discard)(name)
+    return done()
 
 
 def fake_api(path, method="GET", timeout=10):
@@ -98,8 +110,10 @@ def run(cmd):
 
 
 def login():
-    """Mac の再起動（ログイン）の代わり。いったん全部降り、LaunchAgents にあって止められていないものだけ上がる。"""
+    """Mac の再起動（ログイン）の代わり。いったん全部降り、LaunchAgents にあって止められていないものだけ上がる。
+    Docker も立ち上がり直す（再起動の設定が always のコンテナは、手で止めてあっても上がる）。"""
     world["loaded"] = {p.stem for p in AGENTS.glob("*.plist") if p.stem not in world["disabled"]}
+    world["running"] |= {n for n, pol in world["policy"].items() if pol == "always"}
 
 
 def set_env(text):
@@ -173,17 +187,65 @@ run("off")
 check("off: docker が見つからなくても本体は止め、知らせる", (up(), ctl.OFF.exists()), (False, True))
 rc, out = run("on")
 check("on: docker が見つからなければ知らせるが、本体は上げる", (rc, "docker が見つからない" in out, up()), (1, True, True))
+check("on: 戻しきれなかったものは記録に残す（off の印は消す）", (json.loads(ctl.PENDING.read_text())["containers"], ctl.OFF.exists()), (["aivis"], False))
+check("status は、戻しきれなかったものを伝える", "戻しきれなかったもの: コンテナ aivis" in run("status")[1], True)
 world["docker"] = True
+set_env("")  # 設定から消しても、記録に残っていれば戻す（Codex 第1回の指摘1）
+rc, out = run("on")
+check("戻し残しは、次の on で戻し、記録を消す", (rc, "aivis" in world["running"], ctl.PENDING.exists()), (0, True, False))
 
-set_env("")
 rc, out = run("off")
 check("一緒に止める部品の指定が無ければ、本体だけ止めて、指定の仕方を伝える", (rc, up(), "VL_OFF_CONTAINERS" in out, [c for c in calls if c[0] == "docker"]), (0, False, True, []))
 run("on")
 
-world["disabled"].add(WHISPER)  # 以前の off で止めたままのサービス（on で戻せなかったときなど）
-set_env("VL_OFF_SERVICES=local.whisper-server\n")
+# off していない on は、設定に書いてあっても、止めていない部品に触れない（指摘4）
+world["disabled"].add(WHISPER)
+world["loaded"].discard(WHISPER)  # 利用者が自分で止めているサービス
+world["running"].discard("hermes")  # 利用者が自分で止めているコンテナ
+set_env("VL_OFF_CONTAINERS=hermes\nVL_OFF_SERVICES=local.whisper-server\n")
 rc, out = run("on")
-check("on: 止めたままのサービスも上げ直す", (rc, WHISPER in world["loaded"], WHISPER in world["disabled"]), (0, True, False))
+check("off していない on は、止めていない部品に触れない", (rc, WHISPER in world["disabled"], "hermes" in world["running"], [c for c in calls if c[0] == "docker"]), (0, True, False, []))
+world["disabled"].discard(WHISPER)
+world["loaded"].add(WHISPER)
+world["running"].add("hermes")
+
+# launchctl の失敗を成功扱いしない（指摘2）
+world["fail"] = {("bootout", WHISPER)}
+rc, out = run("off")
+check("サービスを降ろせなければ、off は失敗を返して知らせる", (rc, f"{WHISPER} を降ろせませんでした" in out), (1, True))
+world["fail"] = {("enable", WHISPER)}
+rc, out = run("on")
+check("サービスを有効に戻せなければ、on は失敗を返し、戻し残しに残す", (rc, json.loads(ctl.PENDING.read_text())["services"]), (1, [WHISPER]))
+world["fail"] = set()
+check("その戻し残しは、次の on で戻す", (run("on")[0], WHISPER in world["loaded"], WHISPER in world["disabled"], ctl.PENDING.exists()), (0, True, False, False))
+world["fail"] = {("bootout", ctl.LABEL)}
+rc, out = run("off")
+check("本体を降ろせなければ、off は失敗を返して知らせる", (rc, "本体を降ろせませんでした" in out), (1, True))
+world["fail"] = set()
+run("on")
+
+# 壊れた off の記録で落ちない・記録を失わない（指摘3）
+set_env("VL_OFF_CONTAINERS=aivis\n")
+for broken in ("これは JSON ではない", "[]", "null", '{"containers": null}', '{"since": 1}', '{"policies": {"aivis": 1}}'):
+    run("off")
+    ctl.OFF.write_text(broken)
+    for f in ctl.STATE.glob("off-broken-*"):
+        f.unlink()
+    check(f"壊れた off の記録 {broken!r} でも status は落ちない", run("status")[0], 0)
+    rc, out = run("on")
+    check(f"壊れた off の記録 {broken!r}: on は落ちず、控えを残し、設定の部品を戻して知らせる",
+          (rc, len(list(ctl.STATE.glob("off-broken-*"))), "aivis" in world["running"], up(), ctl.OFF.exists(), "壊れていて" in out), (1, 1, True, True, False, True))
+
+# 再起動の設定が always のコンテナも、off の間は止まったまま（指摘5）
+world["policy"]["aivis"] = "always"
+rc, out = run("off")
+check("always のコンテナは、unless-stopped に替えてから止め、元の設定を記録する",
+      (rc, world["policy"]["aivis"], json.loads(ctl.OFF.read_text())["policies"]), (0, "unless-stopped", {"aivis": "always"}))
+login()
+check("always だったコンテナも、Mac を再起動して止まったまま", "aivis" in world["running"], False)
+rc, out = run("on")
+check("on で上げて、再起動の設定を always に戻す", (rc, "aivis" in world["running"], world["policy"]["aivis"]), (0, True, "always"))
+world["policy"]["aivis"] = "unless-stopped"
 
 bad = [f"{name}: {g!r}（期待 {w!r}）" for name, ok, g, w in results if not ok]
 print("\n".join(bad) or f"{len(results)} 例、すべて期待どおり")

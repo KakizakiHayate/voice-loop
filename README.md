@@ -193,6 +193,9 @@ tailscale serve --bg --https=8790 http://127.0.0.1:8790
 
 - 一緒に止める部品は、`config.env` の `VL_OFF_CONTAINERS`（コンテナ名）と `VL_OFF_SERVICES`（launchd のサービスのラベル）に書きます。たとえば声のエンジンと Hermes を Docker で動かしているなら `VL_OFF_CONTAINERS=aivis hermes` です。書かなければ、止めるのは本体だけです
 - `off` にすると、`on` にするまで、herdr や Mac を再起動しても上がりません。`start` と `restart` も `on` として動きます
+- 再起動の設定が `always` のコンテナは、手で止めても Docker が立ち上がり直すと戻るので、`off` の間だけ `unless-stopped` に替え、`on` で戻します
+- `on` が戻すのは、`off` で止めたものだけです。`off` していなければ、本体を起動するだけです
+- `on` で戻しきれなかったもの（Docker が動いていなかった、など）は記録に残り、`status` に出ます。もう一度 `on` で戻せます
 - ほかのツールも使っている部品（聞き取りの whisper を別の音声入力でも使っている、など）を書くと、`off` の間はそのツールからも使えなくなります
 - `off` の間は画面も止まるので、スマホからは `on` にできません。Mac の herdr から `on` を呼びます
 - 頼んだ件の見張り（片づいたら知らせる）は、`off` にすると消えます
