@@ -48,6 +48,9 @@
   .dot.on { background:var(--ok); }
   #statusText { flex:1; min-width:0; }
   #reload { flex:none; border:none; background:none; color:var(--mute); font-size:16px; line-height:1; padding:4px 6px; margin:-4px -6px; } /* 目立たないように小さく、押せる広さは少し持たせる */
+  /* 読み上げの切り替え。読み上げの途中でもすぐ押せるよう、↻ より押せる広さを持たせる。切っている間は色をつけて、文字だけと分かるようにする */
+  #mute { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
+  #mute[aria-pressed="true"] { opacity:1; background:#5a1f1d; }
   #tap, #hubStart { display:none; margin-left:auto; border:none; border-radius:8px; background:var(--ok); color:#fff; font-size:13px; padding:4px 10px; }
   button:disabled, input:disabled { opacity:.35; }
   .row { display:flex; gap:8px; }
@@ -73,7 +76,7 @@
   <div id="asks"></div>
   <div id="log"></div>
   <div id="bar">
-    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
+    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="mute" aria-pressed="false">🔇</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
     <form id="typedForm" class="row"><input id="typed" placeholder="文字で送る" autocomplete="off"><button id="send" type="submit">送る</button></form>
@@ -281,7 +284,8 @@ async function loadSpeakers() {
   if (saved && sp.some(s => String(s.id) === saved)) sel.value = saved; else if (def) sel.value = def.id; // 覚えている声が無い（エンジンを替えた直後など）なら既定の声
   hello(); applyTarget(); // つながったあとで一覧が届いたときも、選んでいる声をサーバーに知らせ、送れるようにする
 }
-const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value })); } catch {} }; // ハブからの報告を、選んでいる声で届けてもらう
+// ハブからの報告を、選んでいる声で届けてもらう。読み上げを切っていれば、音声を送らないでもらう
+const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value, voice: !muted })); } catch {} };
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
 
 // ---------- 再生 ----------
@@ -329,7 +333,25 @@ player.addEventListener('ended', () => { if (nowSilent) { nowSilent = false; if 
 player.addEventListener('error', () => { if (nowSilent || !playing) return; clog('audio error code=' + (player.error && player.error.code)); playNext(); });
 $('tap').onclick = () => { showTap(false); playNext(); };
 function stopPlayback() { gen++; queue = []; playing = false; accepting = false; player.pause(); showTap(false); if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; }
-function finishSpeaking(msg = '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
+function finishSpeaking(msg = muted ? '返答が届きました（文字だけ）' : '話し終わりました') { if (speakingEl) speakingEl.classList.remove('speaking'); speakingEl = null; setStatus(msg); }
+
+// ---------- 読み上げの切り替え（🔇） ----------
+// 端末ごとに覚える。切ると、鳴っている声をその場で止め、本体にも音声を送らないよう伝える（返答の文字はこれまでどおり出る）。
+// 進行中のやり取りは止めない（「停止」と違い、考え中の返答も文字で届く）。戻すと、次の返答から読み上げる
+let muted = false; try { muted = localStorage.getItem('vl.voice') === 'off'; } catch {} // 保存できない端末でも画面は動かす
+function showMute() {
+  $('mute').setAttribute('aria-pressed', String(muted));
+  $('mute').title = muted ? '読み上げを戻す（いまは文字だけ）' : '読み上げを切る（文字だけにする）';
+  $('mute').setAttribute('aria-label', $('mute').title);
+}
+$('mute').onclick = () => {
+  muted = !muted;
+  try { localStorage.setItem('vl.voice', muted ? 'off' : 'on'); } catch {}
+  showMute(); hello(); clog('voice ' + (muted ? 'off' : 'on'));
+  if (muted) { stopPlayback(); setStatus('読み上げオフ（文字だけ）'); }
+  else { prime(); setStatus('読み上げを戻しました（次の返答から）'); } // タップの中で鳴らしておき、報告も鳴らせるようにする
+};
+showMute();
 
 // ---------- 通信 ----------
 // 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。
@@ -361,9 +383,10 @@ function connect() {
       if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + '（ハブを選ぶと読めます）'); return; } // report = 頼んだ件についての、ハブからの自発的な報告
       await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
       if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      if (muted) return; // 読み上げないので、読んでいる印はつけない
       const ai = $('log').querySelectorAll('.msg.ai'); speakingEl = ai[ai.length - 1] || null; if (speakingEl) speakingEl.classList.add('speaking');
     }
-    else if (m.type === 'speaking') { accepting = true; serverDone = false; }
+    else if (m.type === 'speaking') { accepting = !muted; serverDone = false; } // 切っている間に届いた音声は鳴らさない（本体も送らないが、切った直後の分が届くことがある）
     else if (m.type === 'error') { sys('⚠ ' + m.text); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
     else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
     else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
