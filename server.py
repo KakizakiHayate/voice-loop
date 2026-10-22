@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import wave
 from collections import deque
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 
 import anthropic
@@ -912,6 +912,7 @@ class Client:
     def __init__(self, sock: WebSocket):
         self.sock = sock
         self.speaker: int | None = None  # この画面で選ばれている声
+        self.voice = True  # この画面で読み上げるか（画面の 🔇 で切ると、返答は文字だけになる）
 
     async def send(self, **msg):
         await self.sock.send_text(json.dumps(msg, ensure_ascii=False))
@@ -962,7 +963,8 @@ async def ask(agent: dict, text: str) -> tuple[str, str]:
 
 
 async def speak_to(clients: list[Client], text: str, cancel: asyncio.Event):
-    """話し言葉に直し、文ごとに合成して画面へ送る。声は画面ごとの選択に従う。切れた画面は飛ばす。"""
+    """話し言葉に直し、文ごとに合成して画面へ送る。声は画面ごとの選択に従う。切れた画面は飛ばす。
+    読み上げを切った画面には音声を送らない（文字は先に reply で届いている）。聞く画面が無ければ、語り手も合成も呼ばない。"""
     alive = list(clients)
 
     async def each(fn):
@@ -976,13 +978,18 @@ async def speak_to(clients: list[Client], text: str, cancel: asyncio.Event):
 
     await each(lambda c: c.send(type="speaking"))  # これ以降の音声がこのターンのもの（止めた後に届く古い音声と区別する）
     n = 0
-    async for sentence in narrate(text, cancel):
-        voice = {c: DEFAULT_SPEAKER if c.speaker is None else c.speaker for c in alive}  # VOICEVOX では 0 も声の ID
-        wavs = {sp: await asyncio.to_thread(synth, sentence, sp) for sp in set(voice.values())}
-        if cancel.is_set() or not alive:
-            break
-        await each(lambda c: c.sock.send_bytes(wavs[voice[c]]) if c in voice else asyncio.sleep(0))
-        n += 1
+    if any(c.voice for c in alive):
+        async with aclosing(narrate(text, cancel)) as sentences:  # 途中で抜けたら、語り手の生成もすぐ止める
+            async for sentence in sentences:
+                # 読み上げの途中で切った画面は、次の文から外す。聞く画面が無くなれば、そこで止める
+                voice = {c: DEFAULT_SPEAKER if c.speaker is None else c.speaker for c in alive if c.voice}  # VOICEVOX では 0 も声の ID
+                if not voice:
+                    break
+                wavs = {sp: await asyncio.to_thread(synth, sentence, sp) for sp in set(voice.values())}
+                if cancel.is_set() or not alive:
+                    break
+                await each(lambda c: c.sock.send_bytes(wavs[voice[c]]) if c in voice and c.voice else asyncio.sleep(0))
+                n += 1
     await each(lambda c: c.send(type="done", sentences=n))
 
 
@@ -1579,8 +1586,9 @@ async def ws(sock: WebSocket):
                 break
             if msg.get("text") is not None:
                 d = json.loads(msg["text"])
-                if d["type"] == "hello":  # 画面が選んでいる声（ハブからの報告を、その声で届けるため）
+                if d["type"] == "hello":  # 画面が選んでいる声と、読み上げるか（ハブからの報告を、その声で届けるため）。🔇 を押すたびにも届く
                     client.speaker = None if d.get("speaker") in (None, "") else int(d["speaker"])
+                    client.voice = d.get("voice") is not False  # voice を送らない古い画面は、これまでどおり読み上げる
                     continue
                 if d["type"] == "stop":
                     cancel.set()
