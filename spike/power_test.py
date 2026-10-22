@@ -107,7 +107,7 @@ def run(cmd):
     calls.clear()
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        rc = ctl.COMMANDS[cmd]()
+        rc = ctl.main(cmd)  # 本物と同じ入口（上げ下ろしの命令はロックを通る）
     return rc, out.getvalue()
 
 
@@ -292,6 +292,38 @@ world["docker"] = True
 rc, out = run("restart")
 check("戻し残しがあるときの restart も、戻し残しを戻したうえで本体を再起動する",
       (rc, ("launchctl", "kickstart", "-k", f"{ctl.DOMAIN}/{ctl.LABEL}") in calls, "aivis" in world["running"], ctl.PENDING.exists()), (0, True, True, False))
+
+# herdr の起動時の startup が上げている途中で off が来ても、off のあとに本体が上がらない（第3回の指摘）
+import threading  # noqa: E402
+
+set_env("")
+run("start")
+entered, release, done_order = threading.Event(), threading.Event(), []
+real_scaffold = ctl.scaffold
+
+
+def slow_scaffold(uv):
+    entered.set()
+    release.wait(5)  # startup を、off の確認を通り過ぎた所で待たせる
+    return real_scaffold(uv)
+
+
+ctl.scaffold = slow_scaffold
+with contextlib.redirect_stdout(io.StringIO()):
+    t1 = threading.Thread(target=lambda: done_order.append(("startup", ctl.main("startup"))))
+    t1.start()
+    entered.wait(5)
+    t2 = threading.Thread(target=lambda: done_order.append(("off", ctl.main("off"))))
+    t2.start()
+    threading.Event().wait(0.5)
+    waiting = t2.is_alive()
+    release.set()
+    t1.join(10)
+    t2.join(10)
+ctl.scaffold = real_scaffold
+check("startup の途中に来た off は、startup が終わるまで待つ", (waiting, [n for n, _ in done_order]), (True, ["startup", "off"]))
+check("そのあと本体は止まったままで、自動起動の設定も無い", (up(), ctl.PLIST.exists(), ctl.OFF.exists()), (False, False, True))
+run("on")
 
 bad = [f"{name}: {g!r}（期待 {w!r}）" for name, ok, g, w in results if not ok]
 print("\n".join(bad) or f"{len(results)} 例、すべて期待どおり")

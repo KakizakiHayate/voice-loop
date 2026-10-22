@@ -8,6 +8,7 @@ herdr の起動時に呼ばれる startup の本体。常駐は launchd に任�
   設定フォルダ … config.env、ハブの作業フォルダ（指示文）、語り手の切り替え、Vercel の紐づけ
   状態フォルダ … ログ、off の印
 """
+import fcntl
 import json
 import os
 import plistlib
@@ -18,6 +19,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 PLUGIN_ID = "u-space.voice-loop"  # herdr-plugin.toml の id と同じ
@@ -636,9 +638,26 @@ COMMANDS = {
     "start": cmd_start, "stop": cmd_stop, "restart": lambda: cmd_start(restart=True), "on": lambda: cmd_on(), "off": cmd_off,
     "status": cmd_status, "url": cmd_url, "doctor": cmd_doctor, "uninstall": cmd_uninstall, "startup": cmd_startup,
 }
+CHANGES = {"start", "stop", "restart", "on", "off", "uninstall", "startup"}  # 上げ下ろしをする命令
+
+
+@contextmanager
+def one_at_a_time():
+    """上げ下ろしをする命令を、一度に1つずつ動かす（状態フォルダのロック）。重なったら、先の命令が終わるまで待つ。
+    たとえば herdr の起動時の startup が上げている途中で off が来ても、startup が終わってから off が動くので、off のあとに本体が上がらない。"""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "ctl.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def main(name: str) -> int:
+    with one_at_a_time() if name in CHANGES else nullcontext():
+        return COMMANDS[name]()
+
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else ""
     if name not in COMMANDS:
         sys.exit("使い方: ctl.sh " + " | ".join(COMMANDS))
-    sys.exit(COMMANDS[name]())
+    sys.exit(main(name))
