@@ -3,7 +3,8 @@
 # dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "anthropic>=1.0", "openai>=1.40"]
 # ///
 """読み上げを切った画面（🔇）に音声を送らないことと、聞く画面が無いときは語り手も合成も呼ばないことの試験。
-語り手・合成・セッションへの送信は差し替え、画面は作り物の接続で受ける。使い方: uv run spike/voice_off_test.py"""
+語り手（または語り手の API のストリームだけ）・合成・セッションへの送信は差し替え、画面は作り物の接続で受ける。
+「その場で閉じる」は、speak_to が戻った直後に見る（イベントループの後始末で閉じられた分と区別するため）。使い方: uv run spike/voice_off_test.py"""
 import asyncio
 import json
 import os
@@ -19,7 +20,23 @@ import server as s  # noqa: E402
 
 SENTENCES = ["一文目です。", "二文目です。", "三文目です。"]
 narr = {"calls": 0, "yielded": 0, "closed": 0}
+stream = {"closed": 0}
 hooks = {}
+REAL_NARRATE = s.narrate  # 本物の語り手。下の API のストリームだけ差し替えて、閉じ方まで確かめる
+
+
+async def fake_stream(model, text):
+    """語り手の API の代わり。1文ずつ流し、閉じられたら数える。"""
+    try:
+        for i, sentence in enumerate(SENTENCES):
+            yield sentence
+            if "after" in hooks:
+                hooks["after"](i)
+    finally:
+        stream["closed"] += 1
+
+
+s._narrate_stream = fake_stream
 
 
 async def fake_narrate(text, cancel):
@@ -73,7 +90,20 @@ def client(voice=True, speaker=None):
 
 def reset():
     narr.update(calls=0, yielded=0, closed=0)
+    stream.update(closed=0)
     hooks.clear()
+
+
+def speak_now(clients, cancel=None, real=False):
+    """speak_to を走らせ、戻った直後の（イベントループの後始末で閉じられる前の）語り手と API のストリームの閉じた数を返す。"""
+    async def run():
+        await s.speak_to(clients, "返答です", cancel or asyncio.Event())
+        return narr["closed"], stream["closed"]
+    s.narrate = REAL_NARRATE if real else fake_narrate
+    try:
+        return asyncio.run(run())
+    finally:
+        s.narrate = fake_narrate
 
 
 results = []
@@ -107,9 +137,19 @@ check("切った画面にも、終わりの知らせは届く", (on.sock.types()
 c = client()
 reset()
 hooks["after"] = lambda i: setattr(c, "voice", False) if i == 0 else None  # 1文目を聞いたところで 🔇
-asyncio.run(s.speak_to([c], "返答です", asyncio.Event()))
+closed_now = speak_now([c])
 check("読み上げの途中で切ったら、次の文から送らない", (len(c.sock.wavs), c.sock.texts[-1]), (1, {"type": "done", "sentences": 1}))
-check("途中で切ったら、語り手の生成もその場で閉じる", (narr["yielded"], narr["closed"]), (2, 1))
+check("途中で切ったら、語り手の生成もその場で閉じる（speak_to が戻る前に）", (narr["yielded"], closed_now[0]), (2, 1))
+
+c = client()
+reset()
+hooks["after"] = lambda i: setattr(c, "voice", False) if i == 0 else None
+closed_now = speak_now([c], real=True)
+check("本物の語り手でも、途中で切ったら API のストリームまでその場で閉じる", (len(c.sock.wavs), closed_now[1]), (1, 1))
+c = client()
+reset()
+closed_now = speak_now([c], real=True)
+check("本物の語り手で最後まで読んだときも、ストリームは閉じている", (len(c.sock.wavs), closed_now[1]), (3, 1))
 
 on, off = client(), client()
 reset()
@@ -121,8 +161,8 @@ c = client()
 reset()
 cancel = asyncio.Event()
 hooks["after"] = lambda i: cancel.set() if i == 0 else None  # 「停止」は前と同じく効く
-asyncio.run(s.speak_to([c], "返答です", cancel))
-check("「停止」で止めたときも、語り手を閉じる", (len(c.sock.wavs), narr["closed"]), (1, 1))
+closed_now = speak_now([c], cancel)
+check("「停止」で止めたときも、語り手をその場で閉じる", (len(c.sock.wavs), closed_now[0]), (1, 1))
 
 # 画面からの hello（🔇 を押すたびにも届く）
 seen = []

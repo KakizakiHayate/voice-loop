@@ -338,7 +338,7 @@ function finishSpeaking(msg = muted ? '返答が届きました（文字だけ�
 // ---------- 読み上げの切り替え（🔇） ----------
 // 端末ごとに覚える。切ると、鳴っている声をその場で止め、本体にも音声を送らないよう伝える（返答の文字はこれまでどおり出る）。
 // 進行中のやり取りは止めない（「停止」と違い、考え中の返答も文字で届く）。戻すと、次の返答から読み上げる
-let muted = false; try { muted = localStorage.getItem('vl.voice') === 'off'; } catch {} // 保存できない端末でも画面は動かす
+let muted = false; try { muted = localStorage.getItem('vl.voice') === 'off'; } catch {} // 保存が禁止された端末でも、ここで止めない（切ったことは覚えておけない）
 function showMute() {
   $('mute').setAttribute('aria-pressed', String(muted));
   $('mute').title = muted ? '読み上げを戻す（いまは文字だけ）' : '読み上げを切る（文字だけにする）';
