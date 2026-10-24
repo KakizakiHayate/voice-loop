@@ -127,7 +127,7 @@ function localPush(role, text) { if (threadSource !== 'none') return; try { loca
 function renderThread(msgs) {
   $('log').innerHTML = '';
   if (!msgs.length) sys('このセッションにはまだ会話がありません');
-  msgs.forEach(m => m.role === 'note' ? sys('通知: ' + m.text) : bubble(m.role, m.text)); // note = ハブへの自動通知（頼んだ件が片づいた等）
+  msgs.forEach(m => m.role === 'note' ? sys('通知: ' + m.text) : m.role === 'error' ? sys('⚠ ' + m.text) : bubble(m.role, m.text)); // note = ハブへの自動通知（頼んだ件が片づいた等）。error = Hermes に届かなかった・返事が無かった
 }
 async function loadThread() {
   const pane = $('agent').value; if (!pane) return;
@@ -136,7 +136,7 @@ async function loadThread() {
     const r = await (await fetch('/api/history?pane=' + encodeURIComponent(pane))).json();
     if (seq !== loadSeq) return; // 読み込み中に別のセッションへ切り替えた
     threadSource = r.source;
-    renderThread(r.source === 'jsonl' ? r.messages : localMsgs());
+    renderThread(r.source === 'none' ? localMsgs() : r.messages); // jsonl = セッション自身の記録、hermes = 本体が書いた Hermes との会話
   } catch (e) { if (seq === loadSeq) sys('履歴を読めませんでした'); }
 }
 
@@ -380,14 +380,18 @@ function connect() {
     if (m.type === 'status') setStatus(m.text);
     else if (m.type === 'transcript') { if (here) { bubble('me', m.text, 'pending'); localPush('me', m.text); } setStatus('エージェントに送りました。考え中…'); }
     else if (m.type === 'reply') {
-      if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + '（ハブを選ぶと読めます）'); return; } // report = 頼んだ件についての、ハブからの自発的な報告
-      await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
-      if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + (m.saved === false ? '（記録に書けなかったので、ハブの履歴には出ません）' : '（ハブを選ぶと読めます）')); return; } // report = 頼んだ件についての、ハブからの自発的な報告
+      if (m.saved === false) { bubble('ai', m.text); sys('⚠ このやり取りは記録に書けませんでした（開き直すと消えます。本体のログを見てください）'); } // 描き直すと消えるので、そのまま足す
+      else {
+        await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
+        if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      }
       if (muted) return; // 読み上げないので、読んでいる印はつけない
       const ai = $('log').querySelectorAll('.msg.ai'); speakingEl = ai[ai.length - 1] || null; if (speakingEl) speakingEl.classList.add('speaking');
     }
     else if (m.type === 'speaking') { accepting = !muted; serverDone = false; } // 切っている間に届いた音声は鳴らさない（本体も送らないが、切った直後の分が届くことがある）
-    else if (m.type === 'error') { sys('⚠ ' + m.text); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
+    else if (m.type === 'error') { sys('⚠ ' + m.text); if (m.saved === false) sys('⚠ このやり取りは記録に書けませんでした（開き直すと消えます。本体のログを見てください）'); setStatus(''); if (m.gone) { agentsSig = ''; loadAgents(); } } // 相手が消えた・入れ替わった → 一覧を取り直す
+    else if (m.type === 'notice') { sys('⚠ ' + m.text); if (m.saved === false) sys('⚠ このやり取りは記録に書けませんでした（開き直すと消えます。本体のログを見てください）'); } // ハブから報告を受け取れなかった等（いまの話し相手とは別の知らせ）
     else if (m.type === 'done') { serverDone = true; if (!playing && !queue.length) finishSpeaking(); loadAgents(); }
     else if (m.type === 'stopped') { stopPlayback(); setStatus('止めました'); }
     else if (m.type === 'blocked') loadAsks(); // 話している相手が承認で止まった → すぐ並べる
