@@ -1,6 +1,6 @@
 id = "u-space.voice-loop"
 name = "voice-loop"
-version = "0.7.2"
+version = "0.8.0"
 min_herdr_version = "0.9.3"
 description = "口と耳だけで herdr のエージェントと話す。スマホからトランシーバー式で、全セッションを見渡すハブつき"
 platforms = ["macos"]
@@ -9,7 +9,7 @@ platforms = ["macos"]
 # どの命令も scripts/ctl.sh を通る。herdr は命令を最小限の環境で起動する（ログインシェルを通らない）ので、
 # ctl.sh が uv を探してから scripts/ctl.py に渡す。
 
-# herdr がセッションを復元し終えたあとに1回動く。サービスが降りていれば上げ、ハブが居なければ立てる。
+# herdr がセッションを復元し終えたあとに1回動く。サービスが降りていれば上げ、ハブが居なければ立てる（off にしてあれば何もしない）。
 [[startup]]
 command = ["bash", "scripts/ctl.sh", "startup"]
 
@@ -24,6 +24,19 @@ id = "stop"
 title = "voice-loop を止める"
 contexts = ["workspace"]
 command = ["bash", "scripts/ctl.sh", "stop"]
+
+# メモリを空けるとき。本体と、config.env で指定した部品（声のエンジンのコンテナなど）をまとめて止め、on まで上げない。
+[[actions]]
+id = "off"
+title = "voice-loop を off（メモリを空ける。再起動しても止まったまま）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "off"]
+
+[[actions]]
+id = "on"
+title = "voice-loop を on（off で止めたものを上げ直す）"
+contexts = ["workspace"]
+command = ["bash", "scripts/ctl.sh", "on"]
 
 [[actions]]
 id = "restart"

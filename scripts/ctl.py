@@ -1,13 +1,14 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""voice-loop プラグインの操作。herdr の命令（start / stop / restart / status / url / doctor / uninstall）と、
+"""voice-loop プラグインの操作。herdr の命令（start / stop / restart / on / off / status / url / doctor / uninstall）と、
 herdr の起動時に呼ばれる startup の本体。常駐は launchd に任せ、ここは設定の用意と上げ下ろしだけを行う。
 
 端末ごとのものは本体のフォルダに置かない（herdr が入れ直すと置き換わるため）:
   設定フォルダ … config.env、ハブの作業フォルダ（指示文）、語り手の切り替え、Vercel の紐づけ
-  状態フォルダ … ログ
+  状態フォルダ … ログ、off の印
 """
+import fcntl
 import json
 import os
 import plistlib
@@ -18,6 +19,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 PLUGIN_ID = "u-space.voice-loop"  # herdr-plugin.toml の id と同じ
@@ -38,6 +40,9 @@ HUB_ALLOW = "Bash(./hubctl:*)"
 HUB_DENY = ["Edit", "Write", "NotebookEdit"]  # ハブは自分でファイルを書かない。hubctl や設定を書き換えさせない
 HUB_GUARD = '"$CLAUDE_PROJECT_DIR"/.claude/hub-guard'
 ACTION = f"herdr plugin action invoke {PLUGIN_ID}."  # 案内に書く命令の頭
+OFF = STATE / "off"  # off の印。on するまで、herdr や Mac を再起動しても上げない。中身は止めたものの記録（JSON）
+PENDING = STATE / "on-pending"  # on で戻しきれなかった部品の記録（JSON）。次の on でもう一度戻す
+DOCKER_DIRS = [HOME / ".orbstack/bin", Path("/Applications/Docker.app/Contents/Resources/bin")]  # PATH に無いときの docker の置き場所
 
 
 def find(name: str, env: str | None = None) -> str | None:
@@ -268,6 +273,14 @@ def print_checks(doc: dict | None) -> bool:
 
 # ---------- 命令 ----------
 def cmd_start(restart: bool = False) -> int:
+    if OFF.exists() or PENDING.exists():  # start / restart は「動かしたい」なので、off にしてあれば（戻し残しがあれば）on にする
+        print("voice-loop は off になっていたので、on にします。" if OFF.exists() else "前の on で戻しきれなかったものを、もう一度戻します。")
+        return cmd_on(restart)
+    return _start(restart)
+
+
+def _start(restart: bool = False, settle: float = 0) -> int:
+    """本体を用意して上げ、点検する。settle: 点検がそろうまで待つ秒数（on で上げ直した部品が応答し始めるまで）。"""
     uv, herdr = find("uv", "VL_UV"), find("herdr", "HERDR_BIN_PATH")
     if not uv or not herdr:
         print(f"{'uv' if not uv else 'herdr'} が見つかりません。入れてから、もう一度実行してください。")
@@ -286,7 +299,11 @@ def cmd_start(restart: bool = False) -> int:
         for m in made:
             print(f"  - {m}")
     print()
-    print_checks(api("/api/doctor", timeout=60))
+    doc, end = api("/api/doctor", timeout=60), time.time() + settle
+    while doc is not None and not doc.get("ok") and time.time() < end:
+        time.sleep(3)
+        doc = api("/api/doctor", timeout=60)
+    print_checks(doc)
     brain = _config_value(CONFIG / "config.env", "VL_HUB").lower()
     guide = CONFIG / ("hermes/hub.md" if brain == "hermes" else "hub/CLAUDE.md")
     print(f"\n設定: {CONFIG / 'config.env'}\nハブへの指示文: {guide}（書き換えてかまいません）" + ("\nハブの頭: Hermes（VL_HUB=hermes）" if brain == "hermes" else ""))
@@ -304,13 +321,240 @@ def bring_down() -> None:
 def cmd_stop() -> int:
     if loaded():
         bring_down()
-        print(f"voice-loop を止めました。Mac を再起動すると、また上がります。上がらないようにするには `{ACTION}uninstall` です。")
+        print(f"voice-loop を止めました。herdr や Mac を再起動すると、また上がります。上がらないようにするには `{ACTION}off` です。")
     else:
-        print("voice-loop は動いていません。")
+        print("voice-loop は動いていません。" + (f"off になっています（戻すには `{ACTION}on`）。" if OFF.exists() else ""))
     return 0
 
 
+# ---------- off / on（メモリを空ける） ----------
+def _read(path: Path) -> dict | None:
+    """記録を読んで、形を確かめる。読めないか形が違えば None。"""
+    try:
+        d = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    names = lambda v: isinstance(v, list) and all(isinstance(x, str) for x in v)
+    policies = d.get("policies", {}) if isinstance(d, dict) else None
+    if (isinstance(d, dict) and isinstance(d.get("since", ""), str) and names(d.get("containers", [])) and names(d.get("services", []))
+            and isinstance(policies, dict) and all(isinstance(v, str) for v in policies.values())):
+        return d
+    return None
+
+
+def _load(path: Path, keep_broken: bool = False) -> tuple[dict, str, bool]:
+    """off の印・戻し残しの記録を読む。(記録, 知らせること, 中身を確かめられたか)。無ければ ({}, "", True)。
+    壊れていれば、ひとつ前の控え（.bak）から読む。控えも読めなければ中身は分からない（推測で埋めない）。
+    keep_broken なら、壊れていたものの写しを残す。"""
+    if not path.exists():
+        return {}, "", True
+    d = _read(path)
+    if d is not None:
+        return d, "", True
+    kept = ""
+    if keep_broken:
+        kept = STATE / f"{path.name}-broken-{time.strftime('%Y%m%d-%H%M%S')}"
+        shutil.copy(path, kept)
+    why = f"記録 {path} が壊れていて読めませんでした" + (f"（写し: {kept}）" if kept else "")
+    bak = _read(path.with_name(path.name + ".bak"))
+    return (bak, why + "。ひとつ前の控えから読みました", True) if bak is not None else ({}, why, False)
+
+
+def _save(path: Path, rec: dict) -> None:
+    """記録を書く。途中で切れても壊れた記録が残らないよう別名に書いてから置き換え、同じ中身の控え（.bak）も置く。"""
+    text = json.dumps(rec, ensure_ascii=False) + "\n"
+    for target in (path, path.with_name(path.name + ".bak")):
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text)
+        tmp.replace(target)
+
+
+def _drop(path: Path) -> None:
+    for target in (path, path.with_name(path.name + ".bak")):
+        target.unlink(missing_ok=True)
+
+
+def _merge(*lists) -> list[str]:
+    return list(dict.fromkeys(x for items in lists for x in items))
+
+
+def configured() -> tuple[list[str], list[str]]:
+    """config.env で、off のとき一緒に止めると指定した部品。VL_OFF_CONTAINERS（コンテナ名）と VL_OFF_SERVICES（launchd のラベル）。
+    空白かカンマで区切る。"""
+    env = CONFIG / "config.env"
+    split = lambda name: _config_value(env, name).replace(",", " ").split()
+    return split("VL_OFF_CONTAINERS"), split("VL_OFF_SERVICES")
+
+
+def docker(*args: str) -> subprocess.CompletedProcess | None:
+    """docker の命令。docker が見つからなければ None。"""
+    exe = find("docker", "VL_DOCKER") or next((str(d / "docker") for d in DOCKER_DIRS if (d / "docker").is_file()), None)
+    if not exe:
+        return None
+    try:
+        return subprocess.run([exe, *args], capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess([exe, *args], 1, "", "2分待っても終わりませんでした")
+
+
+def _why(r: subprocess.CompletedProcess) -> str:
+    text = (r.stderr or r.stdout).strip()
+    return text.splitlines()[-1] if text else f"終了コード {r.returncode}"
+
+
+NO_DOCKER = "docker が見つからないので、コンテナ（{}）を{}られませんでした"
+
+
+def containers_off(rec: dict) -> list[str]:
+    """off の記録にあるコンテナを止める。問題を返す。
+    再起動の設定が always のものは、手で止めても Docker が立ち上がり直すと戻るので、unless-stopped に替えてから止める。
+    元の設定は、替える前に記録に書いておく（替えた直後に途切れても、on で戻せるように）。"""
+    problems = []
+    for name in rec["containers"]:
+        r = docker("inspect", "-f", "{{.HostConfig.RestartPolicy.Name}}", name)
+        if r is None:
+            return [NO_DOCKER.format("、".join(rec["containers"]), "止め")]
+        if r.returncode:
+            problems.append(f"コンテナ {name} を止められませんでした: {_why(r)}")
+            continue
+        if r.stdout.strip() == "always":
+            rec["policies"][name] = "always"
+            _save(OFF, rec)
+            u = docker("update", "--restart", "unless-stopped", name)
+            if u.returncode:
+                problems.append(f"コンテナ {name} の再起動の設定を替えられませんでした。Mac を再起動すると戻ります: {_why(u)}")
+        s = docker("stop", name)
+        if s.returncode:
+            problems.append(f"コンテナ {name} を止められませんでした: {_why(s)}")
+    return problems
+
+
+def containers_on(names: list[str], policies: dict) -> tuple[list[str], list[str], dict]:
+    """コンテナを上げ、off で替えた再起動の設定を戻す。(問題, 上げられなかったもの, 戻せなかった設定)。"""
+    if not names and not policies:
+        return [], [], {}
+    if docker("version", "--format", "{{.Client.Version}}") is None:
+        return [NO_DOCKER.format("、".join(names or policies), "上げ")], list(names), dict(policies)
+    problems, failed, left = [], [], {}
+    for name in names:
+        r = docker("start", name)
+        if r.returncode:
+            problems.append(f"コンテナ {name} を上げられませんでした: {_why(r)}")
+            failed.append(name)
+    for name, policy in policies.items():
+        u = docker("update", "--restart", policy, name)
+        if u.returncode:
+            problems.append(f"コンテナ {name} の再起動の設定を {policy} に戻せませんでした: {_why(u)}")
+            left[name] = policy
+    return problems, failed, left
+
+
+def services_off(labels: list[str]) -> list[str]:
+    """launchd のサービスを降ろし、ログインしても上がらないようにする（plist はそのサービスのものなので動かさない）。"""
+    problems = []
+    for label in labels:
+        launchctl("bootout", f"{DOMAIN}/{label}")  # 上がっていないときは失敗が返るので、結果は下で確かめる
+        if launchctl("print", f"{DOMAIN}/{label}").returncode == 0:
+            problems.append(f"{label} を降ろせませんでした（動いたままです）")
+        r = launchctl("disable", f"{DOMAIN}/{label}")
+        if r.returncode:
+            problems.append(f"{label} を、ログインしても上がらないようにできませんでした: {_why(r)}")
+    return problems
+
+
+def services_on(labels: list[str]) -> tuple[list[str], list[str]]:
+    """(問題, 上げられなかったもの)。"""
+    problems, failed = [], []
+    for label in labels:
+        r = launchctl("enable", f"{DOMAIN}/{label}")
+        if r.returncode:
+            problems.append(f"{label} を有効に戻せませんでした: {_why(r)}")
+            failed.append(label)
+            continue
+        if launchctl("print", f"{DOMAIN}/{label}").returncode == 0:
+            continue  # もう上がっている
+        plist = HOME / "Library/LaunchAgents" / f"{label}.plist"
+        r = launchctl("bootstrap", DOMAIN, str(plist)) if plist.exists() else None
+        if r is None or r.returncode:
+            problems.append(f"{label} を上げられませんでした: " + (_why(r) if r else f"{plist} がありません"))
+            failed.append(label)
+    return problems, failed
+
+
+def _records() -> tuple[dict, dict, list[str], bool]:
+    """off の記録と戻し残しの記録。(off, 戻し残し, 知らせること, 両方とも中身を確かめられたか)。"""
+    rec, note1, ok1 = _load(OFF, keep_broken=True)
+    pend, note2, ok2 = _load(PENDING, keep_broken=True)
+    return rec, pend, [n for n in (note1, note2) if n], ok1 and ok2
+
+
+def cmd_off() -> int:
+    """メモリを空けるために止める。本体と、config.env で指定した部品を止め、on するまで、herdr や Mac を再起動しても上げない。
+    サーバーのメモリ上にある、頼んだ件の見張りはここで消える。"""
+    rec, pend, problems, _ = _records()
+    want_c, want_s = configured()
+    policies = {**pend.get("policies", {}), **rec.get("policies", {})}
+    rec = {"since": rec.get("since") or time.strftime("%Y-%m-%d %H:%M"),  # もう一度 off しても、止めた時刻は最初のまま
+           # 戻し残し（再起動の設定だけを戻せなかったコンテナも）は、off の記録に移して止める
+           "containers": _merge(rec.get("containers", []), pend.get("containers", []), policies, want_c),
+           "services": _merge(rec.get("services", []), pend.get("services", []), want_s),
+           "policies": policies}
+    STATE.mkdir(parents=True, exist_ok=True)
+    _save(OFF, rec)  # 先に印を置く（降ろす途中で startup が上げ直さないように）
+    _drop(PENDING)
+    if loaded():
+        bring_down()
+    if loaded():
+        problems.append("本体を降ろせませんでした（動いたままです）")
+    if PLIST.exists():
+        PLIST.replace(STATE / "plist-while-off.plist")  # ログインしたときに上がらないよう外す。on で作り直す
+    problems += containers_off(rec) + services_off(rec["services"])
+    print("voice-loop を off にしました。on にするまで、herdr や Mac を再起動しても上がりません。")
+    print("止めたもの: " + "、".join(["本体", *(f"コンテナ {c}" for c in rec["containers"]), *rec["services"]]))
+    if not rec["containers"] and not rec["services"]:
+        print("（一緒に止める部品は指定されていません。声のエンジンなども止めるなら、config.env の VL_OFF_CONTAINERS / VL_OFF_SERVICES に書きます）")
+    for p in problems:
+        print("⚠ " + p)
+    print(f"on にするには `{ACTION}on` です。")
+    return 1 if problems else 0
+
+
+def cmd_on(restart: bool = False) -> int:
+    """off で止めたもの（と、前の on で戻しきれなかったもの）を上げ直し、本体を起動する（start と同じ用意と点検まで）。
+    戻すのは記録にあるものだけ。off していなければ本体を起動するだけで、設定に書いてあっても止めていない部品には触れない。"""
+    rec, pend, problems, known = _records()
+    containers = _merge(rec.get("containers", []), pend.get("containers", []))
+    services = _merge(rec.get("services", []), pend.get("services", []))
+    policies = {**pend.get("policies", {}), **rec.get("policies", {})}
+    if not known:  # 何を止めたか分からない。推測で上げると、止めていないものを上げてしまうので、上げずに知らせる
+        want_c, want_s = configured()
+        candidates = [*(f"コンテナ {c}" for c in want_c), *want_s]
+        problems.append("何を止めたか確かめられないので、記録にない部品は戻していません"
+                        + (f"。config.env にあるもの（{'、'.join(candidates)}）が止まったままなら、手で戻してください" if candidates else ""))
+    p1, failed_s = services_on(services)
+    p2, failed_c, left = containers_on(containers, policies)
+    problems += p1 + p2
+    if failed_s or failed_c or left:
+        _save(PENDING, {"containers": failed_c, "services": failed_s, "policies": left})  # 次の on で、もう一度戻す
+    else:
+        _drop(PENDING)
+    _drop(OFF)
+    rc = _start(restart, settle=90 if containers or services else 0)  # 声のエンジンなどが応答し始めるまで、点検を待つ
+    for p in problems:
+        print("⚠ " + p)
+    if failed_s or failed_c or left:
+        print(f"戻しきれなかったものは、もう一度 `{ACTION}on` で戻せます。")
+    return rc or (1 if problems else 0)
+
+
 def cmd_status() -> int:
+    if OFF.exists():
+        print(f"voice-loop は off です（{_load(OFF)[0].get('since', '?')} から）。on にするには `{ACTION}on` です。")
+        return 0
+    if PENDING.exists():
+        left = _load(PENDING)[0]
+        names = [*(f"コンテナ {c}" for c in left.get("containers", [])), *left.get("services", []), *(f"コンテナ {c} の再起動の設定" for c in left.get("policies", {}))]
+        print(f"前の on で戻しきれなかったもの: {'、'.join(names) or '（記録が読めません）'}。`{ACTION}on` でもう一度戻せます。")
     up = api("/api/agents", timeout=5)
     print(f"常駐サービス: {'登録されています' if loaded() else '登録されていません'}")
     print(f"サーバー: {'応答あり' if up is not None else '応答なし'}")
@@ -331,6 +575,9 @@ def cmd_url() -> int:
 
 
 def cmd_doctor() -> int:
+    if OFF.exists():
+        print(f"voice-loop は off です（{_load(OFF)[0].get('since', '?')} から）。点検するには、先に `{ACTION}on` です。")
+        return 0
     uv, herdr = find("uv", "VL_UV"), find("herdr", "HERDR_BIN_PATH")
     local = [
         ("uv", bool(uv), "https://docs.astral.sh/uv/ の手順で入れてください"),
@@ -365,7 +612,10 @@ def cmd_uninstall() -> int:
 
 
 def cmd_startup() -> int:
-    """herdr がセッションを復元し終えたあとに呼ばれる。まだ start していない端末では何もしない。"""
+    """herdr がセッションを復元し終えたあとに呼ばれる。まだ start していない端末と、off にしてある端末では何もしない。"""
+    if OFF.exists():
+        print(f"voice-loop は off なので上げません。on にするには `{ACTION}on` です。")
+        return 0
     if not PLIST.exists():
         return 0
     uv, herdr = find("uv", "VL_UV"), find("herdr", "HERDR_BIN_PATH")
@@ -385,12 +635,29 @@ def cmd_startup() -> int:
 
 
 COMMANDS = {
-    "start": cmd_start, "stop": cmd_stop, "restart": lambda: cmd_start(restart=True), "status": cmd_status,
-    "url": cmd_url, "doctor": cmd_doctor, "uninstall": cmd_uninstall, "startup": cmd_startup,
+    "start": cmd_start, "stop": cmd_stop, "restart": lambda: cmd_start(restart=True), "on": lambda: cmd_on(), "off": cmd_off,
+    "status": cmd_status, "url": cmd_url, "doctor": cmd_doctor, "uninstall": cmd_uninstall, "startup": cmd_startup,
 }
+CHANGES = {"start", "stop", "restart", "on", "off", "uninstall", "startup"}  # 上げ下ろしをする命令
+
+
+@contextmanager
+def one_at_a_time():
+    """上げ下ろしをする命令を、一度に1つずつ動かす（状態フォルダのロック）。重なったら、先の命令が終わるまで待つ。
+    たとえば herdr の起動時の startup が上げている途中で off が来ても、startup が終わってから off が動くので、off のあとに本体が上がらない。"""
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "ctl.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def main(name: str) -> int:
+    with one_at_a_time() if name in CHANGES else nullcontext():
+        return COMMANDS[name]()
+
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else ""
     if name not in COMMANDS:
         sys.exit("使い方: ctl.sh " + " | ".join(COMMANDS))
-    sys.exit(COMMANDS[name]())
+    sys.exit(main(name))
