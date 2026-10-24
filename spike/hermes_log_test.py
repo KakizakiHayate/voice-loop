@@ -80,6 +80,16 @@ def say(w, text):
     w.send_json({"type": "text", "text": text, "pane": s.HERMES_PANE, "speaker": 0})
 
 
+def drain(w):
+    """ここまでに届いたものを受け取る（「停止」を送り、その返事までを読む。届かないものを待ち続けない）。"""
+    w.send_json({"type": "stop"})
+    return until(w, "stopped")[:-1]
+
+
+def first(msgs, kind):
+    return next((m for m in msgs if m["type"] == kind), {})
+
+
 def until(w, kind):
     """kind が来るまで受け取る。来たものの種類の並びを返す。"""
     seen = []
@@ -147,14 +157,18 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     with c.websocket_connect(WS) as w:
         w.send_json({"type": "hello", "speaker": 0})
         c.portal.call(s.report, D, "blocked")
-        m = until(w, "reply")[-1]
+        m = first(drain(w), "reply")
     s.list_agents = lambda: []
-    check("画面に報告が届く", (m["report"], m["about"], m["pane"]), (True, "proj｜テスト", "hermes"))
+    check("画面に報告が届く", (m.get("report"), m.get("about"), m.get("pane")), (True, "proj｜テスト", "hermes"))
     check("記録にも残る", records()[-2:], [("note", "proj｜テスト が承認・入力待ちで止まっています"), ("ai", "承認待ちです。ls を実行していいか聞いています")])
 
     # ---- 報告を受け取れなかった（Hermes が落ちている・待ちきれない）
     plan.append((0, RuntimeError("Hermes に接続できません（refused）。コンテナが動いているか確認してください")))
-    c.portal.call(s.report, D, "done")
+    with c.websocket_connect(WS) as w:
+        c.portal.call(s.report, D, "done")
+        m = first(drain(w), "notice")
+    check("報告を受け取れなかったことは、開いている画面にも届く", (m.get("text"), m.get("saved")), (
+        "proj｜テスト: ハブから報告を受け取れませんでした: Hermes に接続できません（refused）。コンテナが動いているか確認してください", True))
     check("報告の失敗も記録（見出しのあとに）", records()[-2:], [
         ("note", "proj｜テスト が完了しました"), ("error", "ハブから報告を受け取れませんでした: Hermes に接続できません（refused）。コンテナが動いているか確認してください")])
     plan.append((0, TimeoutError("timed out")))
@@ -246,8 +260,13 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         m = until(w, "error")[-1]
         check("書けなかった失敗も saved=False で届く", (m["text"], m["saved"]), ("Hermes が 502 を返しました", False))
         c.portal.call(s.report, D, "done")
-        m = until(w, "reply")[-1]
-        check("書けなかった報告も saved=False で届く", (m["text"], m["report"], m["saved"]), ("書けないときの報告", True, False))
+        m = first(drain(w), "reply")
+        check("書けなかった報告も saved=False で届く", (m.get("text"), m.get("report"), m.get("saved")), ("書けないときの報告", True, False))
+        plan.append((0, RuntimeError("Hermes に接続できません（down）")))
+        c.portal.call(s.report, D, "done")
+        m = first(drain(w), "notice")
+        check("報告を受け取れず、その失敗も書けなかったら、画面に saved=False で知らせる", (m.get("text"), m.get("saved")), (
+            "proj｜テスト: ハブから報告を受け取れませんでした: Hermes に接続できません（down）", False))
     s.HERMES_LOG.chmod(0o644)
     check("書けない間、記録は増えない", len(records()), n)
     check("書けなくても台帳には入る（守りは会話どおりに働く）", s.hub_turns(2), [(s.hub_turns(2)[0][0], "書けないときの失敗"), (s.hub_turns(2)[1][0], "書けないとき")])
@@ -260,6 +279,13 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         m = until(w, "reply")[-1]
     s.hermes_log = real_log
     check("発言だけ書けなくても saved=False（履歴から発言が欠ける）", (m["saved"], records()[-1]), (False, ("ai", "発言だけ書けなかった返事")))
+    s.hermes_log = lambda role, text, **k: False if role == "error" else real_log(role, text, **k)  # 見出しは書けて、失敗だけ書けなかった
+    plan.append((0, RuntimeError("Hermes に接続できません（late）")))
+    with c.websocket_connect(WS) as w:
+        c.portal.call(s.report, D, "done")
+        m = first(drain(w), "notice")
+    s.hermes_log = real_log
+    check("報告の失敗だけ書けなかったときも saved=False", m.get("saved"), False)
     plan.append((0, "戻ったあとの返事"))
     with c.websocket_connect(WS) as w:
         say(w, "戻ったあと")

@@ -1259,7 +1259,13 @@ async def report(d: dict, kind: str):
             if state == "done" and reply.strip():
                 saved = hermes_log("ai", reply, report=True, about=label) and saved
             else:
-                hermes_log("error", f"ハブから報告を受け取れませんでした: {_clip(reply, 200) or '返事が空でした'}", about=label)
+                failed = f"ハブから報告を受け取れませんでした: {_clip(reply, 200) or '返事が空でした'}"
+                saved = hermes_log("error", failed, about=label) and saved
+                for c in list(CLIENTS):  # 開いている画面には、いま知らせる（記録に書けなければ、ここでしか伝わらない）
+                    try:
+                        await c.send(type="notice", text=f"{label}: {failed}", saved=saved)
+                    except Exception:
+                        pass
         if state != "done" or not reply.strip():
             return
         clients = list(CLIENTS)
