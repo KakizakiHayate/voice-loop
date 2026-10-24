@@ -380,9 +380,12 @@ function connect() {
     if (m.type === 'status') setStatus(m.text);
     else if (m.type === 'transcript') { if (here) { bubble('me', m.text, 'pending'); localPush('me', m.text); } setStatus('エージェントに送りました。考え中…'); }
     else if (m.type === 'reply') {
-      if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + '（ハブを選ぶと読めます）'); return; } // report = 頼んだ件についての、ハブからの自発的な報告
-      await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
-      if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      if (!here) { if (m.report) sys('ハブから報告が届きました: ' + m.about + (m.saved === false ? '（記録に書けなかったので、ハブの履歴には出ません）' : '（ハブを選ぶと読めます）')); return; } // report = 頼んだ件についての、ハブからの自発的な報告
+      if (m.saved === false) { bubble('ai', m.text); sys('⚠ この返事は記録に書けませんでした（開き直すと消えます。本体のログを見てください）'); } // 描き直すと消えるので、そのまま足す
+      else {
+        await loadThread(); // 記録から描き直す（新しいセッションは、この時点で初めて記録ができている）
+        if (threadSource === 'none') { bubble('ai', m.text); localPush('ai', m.text); }
+      }
       if (muted) return; // 読み上げないので、読んでいる印はつけない
       const ai = $('log').querySelectorAll('.msg.ai'); speakingEl = ai[ai.length - 1] || null; if (speakingEl) speakingEl.classList.add('speaking');
     }

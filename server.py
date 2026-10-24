@@ -646,25 +646,37 @@ HERMES_LOG = STATE_DIR / "hermes-log.jsonl"
 HERMES_LOG_MAX = 8_000_000  # 超えたら hermes-log.1.jsonl に回す（一つ前の分だけ残す）
 
 
-def hermes_log(role: str, text: str, **extra):
+def hermes_log(role: str, text: str, **extra) -> bool:
+    """1件を書き足す。書けなかったら False（会話は止めない。呼び出し側が画面に知らせる）。"""
+    line = (json.dumps({"at": time.time(), "role": role, "text": text, **extra}, ensure_ascii=False) + "\n").encode()
     try:
         HERMES_LOG.parent.mkdir(parents=True, exist_ok=True)
         if HERMES_LOG.exists() and HERMES_LOG.stat().st_size > HERMES_LOG_MAX:
             HERMES_LOG.replace(HERMES_LOG.with_name("hermes-log.1.jsonl"))
-        with HERMES_LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({"at": time.time(), "role": role, "text": text, **extra}, ensure_ascii=False) + "\n")
+        with HERMES_LOG.open("ab+") as f:
+            if f.seek(0, os.SEEK_END):  # 前の書き込みが途中で切れて末尾に改行が無ければ、つなげずに次の行から書く
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    line = b"\n" + line
+            f.write(line)
+        return True
     except OSError:
-        traceback.print_exc()  # 記録できなくても、会話は止めない
+        traceback.print_exc()
+        return False
 
 
-def hermes_records(tail_bytes: int = 2_000_000) -> list[dict]:
-    if not HERMES_LOG.exists():
-        return []
+def hermes_records(tail_bytes: int = 2_000_000) -> list[dict] | None:
+    """記録の行（壊れた行は飛ばす）。記録そのものを読めなければ None。"""
+    try:
+        lines = read_lines(HERMES_LOG, tail_bytes=tail_bytes) if HERMES_LOG.exists() else []
+    except OSError:
+        traceback.print_exc()
+        return None
     out = []
-    for line in read_lines(HERMES_LOG, tail_bytes=tail_bytes):
+    for line in lines:
         try:
             d = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):  # 壊れた行・入れ子が深すぎる行
             continue
         if isinstance(d, dict) and isinstance(d.get("role"), str) and isinstance(d.get("text"), str):
             out.append(d)
@@ -673,19 +685,25 @@ def hermes_records(tail_bytes: int = 2_000_000) -> list[dict]:
 
 def hermes_history(limit: int = 40) -> list[dict]:
     """画面に出す Hermes との会話。形は history() と同じ（role と text）。"""
-    return [{"role": d["role"], "text": d["text"]} for d in hermes_records() if d["role"] in ("me", "ai", "note", "error") and d["text"]][-limit:]
+    records = hermes_records()
+    if records is None:
+        return [{"role": "error", "text": f"Hermes との会話の記録を読めませんでした（{HERMES_LOG.name}。本体のログを見てください）"}]
+    return [{"role": d["role"], "text": d["text"]} for d in records if d["role"] in ("me", "ai", "note", "error") and d["text"]][-limit:]
 
 
 # Hermes がハブのときの、ユーザーの発言と Hermes の返答の台帳。Claude Code のハブでは記録（JSONL）から読むものを、ここでは本体が直接持つ。
 # 承認に答える・閉じるの守り（「見たあとにユーザーが発言したか」「聞いたときの返答に問いがあるか」）はこの台帳で確かめる。自動通知は載せない。
-# 中身は上の記録にも書き、起動のときに記録から戻す（再起動で消えない。発言の ID は再起動をまたいでも重ならない）
+# 中身は上の記録にも書き、起動のときに記録から戻す（再起動で消えない。発言の ID は再起動をまたいでも重ならない）。
+# 記録を読めなければ空から始める（守りは「まだ発言が無い」として、新しい発言を待つ側に倒れる）
 HERMES_TURNS: deque = deque(maxlen=50)  # (発言の ID, ユーザーの文, Hermes の返答)
+_unsaved: set[str] = set()  # 記録に書けなかった発言の ID（画面に「記録に残っていない」と知らせるため）
 
 
 def hermes_turn_begin(text: str) -> str:
     turn = f"h{os.urandom(6).hex()}"
     HERMES_TURNS.append([turn, text, ""])
-    hermes_log("me", text, turn=turn)
+    if not hermes_log("me", text, turn=turn):
+        _unsaved.add(turn)
     return turn
 
 
@@ -693,13 +711,17 @@ def hermes_turn_end(turn: str, reply: str):
     for row in HERMES_TURNS:
         if row[0] == turn:
             row[2] = reply
-    if reply:
-        hermes_log("ai", reply, turn=turn)
+    if reply and not hermes_log("ai", reply, turn=turn):
+        _unsaved.add(turn)
 
 
 def _load_hermes_turns():
+    records = hermes_records()
+    if records is None:
+        print(f"[hermes] 記録を読めないので、守りの台帳は空から始めます: {HERMES_LOG}", flush=True)
+        return
     rows: dict[str, list] = {}
-    for d in hermes_records():
+    for d in records:
         turn = d.get("turn")
         if not isinstance(turn, str):
             continue
@@ -713,8 +735,8 @@ def _load_hermes_turns():
 _load_hermes_turns()
 
 
-async def hermes_exchange(text: str) -> tuple[str, str]:
-    """Hermes に1往復し、発言と返事を記録する。(返事, 失敗の理由) を返す。
+async def hermes_exchange(text: str) -> tuple[str, str, bool]:
+    """Hermes に1往復し、発言と返事を記録する。(返事, 失敗の理由, 記録に書けたか) を返す。
     Hermes とのやり取りは同時に1件だけ（自動通知もこの順番を待つ）。"""
     async with pane_lock(HERMES_PANE):
         turn = hermes_turn_begin(text)  # 発言の台帳。承認に答える・閉じるの守りが「見たあとの発言か」を見る
@@ -724,13 +746,15 @@ async def hermes_exchange(text: str) -> tuple[str, str]:
             why = str(e) if isinstance(e, RuntimeError) else f"{type(e).__name__}: {e}"
             if not isinstance(e, RuntimeError):
                 traceback.print_exc()
-            hermes_log("error", why[:300], turn=turn)
-            return "", why
-        hermes_turn_end(turn, reply)
-        if not reply:
-            hermes_log("error", "Hermes の返事が空でした", turn=turn)
-            return "", "Hermes の返事が空でした"
-        return reply, ""
+            reply = ""
+        else:
+            hermes_turn_end(turn, reply)
+            why = "" if reply else "Hermes の返事が空でした"
+        if why and not hermes_log("error", why[:300], turn=turn):
+            _unsaved.add(turn)
+        saved = turn not in _unsaved
+        _unsaved.discard(turn)
+        return reply, why, saved
 
 
 def hub_turns(n: int = 1) -> list[tuple[str, str]]:
@@ -1222,8 +1246,9 @@ async def report(d: dict, kind: str):
             if not now or now["status"] != "blocked":
                 hlog(f"報告を省略（もう止まっていない）: {label}")
                 return
+        saved = True  # Hermes のとき、見出しと報告を記録に書けたか
         if hub.get("hermes"):  # Claude Code のハブは自分の記録に残る。Hermes は本体が記録する（画面が無くても、あとで履歴に出る）
-            hermes_log("note", note[len(NOTE_PREFIX):].split("‖", 1)[0].strip(), about=label)
+            saved = hermes_log("note", note[len(NOTE_PREFIX):].split("‖", 1)[0].strip(), about=label)
         REPORTING = True
         try:
             state, reply = await ask(hub, note)
@@ -1232,7 +1257,7 @@ async def report(d: dict, kind: str):
         hlog(f"報告 {kind}: {label} → {state}（画面 {len(CLIENTS)}）", flush=True)
         if hub.get("hermes"):
             if state == "done" and reply.strip():
-                hermes_log("ai", reply, report=True, about=label)
+                saved = hermes_log("ai", reply, report=True, about=label) and saved
             else:
                 hermes_log("error", f"ハブから報告を受け取れませんでした: {_clip(reply, 200) or '返事が空でした'}", about=label)
         if state != "done" or not reply.strip():
@@ -1240,7 +1265,7 @@ async def report(d: dict, kind: str):
         clients = list(CLIENTS)
         for c in clients:
             try:
-                await c.send(type="reply", pane=hub["pane"], text=reply, report=True, about=label)
+                await c.send(type="reply", pane=hub["pane"], text=reply, report=True, about=label, saved=saved)
             except Exception:
                 clients.remove(c)
         if clients:
@@ -1617,13 +1642,13 @@ async def ws(sock: WebSocket):
             job = asyncio.create_task(hermes_exchange(text))
             _tasks.add(job)
             job.add_done_callback(_tasks.discard)
-            reply, why = await asyncio.shield(job)
+            reply, why, saved = await asyncio.shield(job)
             if why:
-                await send(type="error", text=why[:300])
+                await send(type="error", text=why[:300], saved=saved)
                 return
             if cancel.is_set():
                 return
-            await send(type="reply", pane=pane, text=reply)
+            await send(type="reply", pane=pane, text=reply, saved=saved)  # saved=False なら、画面は記録から描き直さずに足す
             await speak_to([client], reply, cancel)
             return
         agent = next((a for a in list_agents() if a["pane"] == pane), None)

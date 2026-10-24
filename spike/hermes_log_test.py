@@ -224,13 +224,84 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     check("Claude Code のハブへの報告は Hermes の記録に入らない", len(records()), n)
     s.HERMES_HUB = True
 
+    # ---- 前の書き込みが途中で切れていた（末尾に改行が無い）: 次の発言をつなげずに書く
+    with s.HERMES_LOG.open("a") as f:
+        f.write('{"role": "ai", "text": "途中で切れた')
+    plan.append((0, "切れたあとの返事"))
+    with c.websocket_connect(WS) as w:
+        say(w, "切れたあとの発言")
+        until(w, "reply")
+    check("切れた行のあとも、発言と返事が履歴に出る", history()["messages"][-2:], [{"role": "me", "text": "切れたあとの発言"}, {"role": "ai", "text": "切れたあとの返事"}])
+    check("切れた行は1行のまま残り、次の行とつながらない", s.HERMES_LOG.read_text().splitlines()[-3], '{"role": "ai", "text": "途中で切れた')
+
+    # ---- 記録に書けない（ディスクがいっぱい・権限など）: 会話は止めず、画面に「記録に書けなかった」と伝える
+    n = len(records())
+    s.HERMES_LOG.chmod(0o444)
+    plan.extend([(0, "書けないときの返事"), (0, RuntimeError("Hermes が 502 を返しました")), (0, "書けないときの報告")])
+    with c.websocket_connect(WS) as w:
+        say(w, "書けないとき")
+        m = until(w, "reply")[-1]
+        check("書けなかった返事は saved=False で届く", (m["text"], m["saved"]), ("書けないときの返事", False))
+        say(w, "書けないときの失敗")
+        m = until(w, "error")[-1]
+        check("書けなかった失敗も saved=False で届く", (m["text"], m["saved"]), ("Hermes が 502 を返しました", False))
+        c.portal.call(s.report, D, "done")
+        m = until(w, "reply")[-1]
+        check("書けなかった報告も saved=False で届く", (m["text"], m["report"], m["saved"]), ("書けないときの報告", True, False))
+    s.HERMES_LOG.chmod(0o644)
+    check("書けない間、記録は増えない", len(records()), n)
+    check("書けなくても台帳には入る（守りは会話どおりに働く）", s.hub_turns(2), [(s.hub_turns(2)[0][0], "書けないときの失敗"), (s.hub_turns(2)[1][0], "書けないとき")])
+    check("書けなかった印は持ち越さない", s._unsaved, set())
+    real_log = s.hermes_log
+    s.hermes_log = lambda role, text, **k: False if role == "me" else real_log(role, text, **k)  # 発言だけ書けなかった
+    plan.append((0, "発言だけ書けなかった返事"))
+    with c.websocket_connect(WS) as w:
+        say(w, "発言だけ書けない")
+        m = until(w, "reply")[-1]
+    s.hermes_log = real_log
+    check("発言だけ書けなくても saved=False（履歴から発言が欠ける）", (m["saved"], records()[-1]), (False, ("ai", "発言だけ書けなかった返事")))
+    plan.append((0, "戻ったあとの返事"))
+    with c.websocket_connect(WS) as w:
+        say(w, "戻ったあと")
+        m = until(w, "reply")[-1]
+    check("書けるようになれば saved=True", m["saved"], True)
+
     # ---- 本当に起動し直す（別のプロセスで本体を読み込む）: 台帳が記録から戻り、新しい発言の ID は前と重ならない
     probe = subprocess.run([sys.executable, "-c", "import json, server as s; n = len(s.HERMES_TURNS); t = s.hermes_turn_begin('起動し直したあと');"
                             " print(json.dumps({'turns': [list(r) for r in s.HERMES_TURNS][:n], 'new': t}))"],
                            cwd=ROOT, capture_output=True, text=True, timeout=120)
     after = json.loads(probe.stdout.strip().splitlines()[-1]) if probe.returncode == 0 else {"turns": None, "new": None}
-    check("起動し直すと、台帳が記録から戻る", after["turns"], [list(r) for r in s.HERMES_TURNS])
+    check("起動し直すと、台帳が記録から戻る（記録に書けなかった発言は戻らない）", after["turns"], [list(r) for r in s.HERMES_TURNS if not r[1].startswith(("書けないとき", "発言だけ書けない"))])
     check("起動し直したあとの発言の ID は、前のどれとも違う", after["new"] in {r[0] for r in s.HERMES_TURNS}, False)
+
+    # ---- 記録を読めなくても、本体は起動する（守りの台帳は空から。履歴は「読めなかった」と出す）
+    def start_with(prepare, hub="hermes"):
+        state = Path(tempfile.mkdtemp())
+        prepare(state / "hermes-log.jsonl")
+        env = {**os.environ, "VL_STATE_DIR": str(state), "VL_HUB": hub, "VL_HERMES_KEY": "k1" if hub == "hermes" else ""}
+        code = ("import json, server as s; h = s.hermes_history(); ok = s.hermes_log('me', 'x');"
+                " print(json.dumps({'turns': len(s.HERMES_TURNS), 'history': [m['role'] for m in h], 'last': h[-1]['text'] if h else '', 'write': ok}))")
+        r = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        return json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {"exit": r.returncode, "err": r.stderr.strip().splitlines()[-1:]}
+
+    got = start_with(lambda path: path.mkdir(parents=True), hub="claude")
+    check("記録の場所がフォルダでも起動する（ハブが Claude Code でも）", (got.get("turns"), got.get("history"), got.get("write")), (0, ["error"], False))
+    check("読めないことは履歴に出る", "読めませんでした" in got.get("last", ""), True)
+
+    def unreadable(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"role": "me", "text": "読めない", "turn": "hX"}) + "\n")
+        path.chmod(0)
+
+    got = start_with(unreadable)
+    check("権限が無くて読めなくても起動する", (got.get("turns"), got.get("history")), (0, ["error"]))
+
+    def deep(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[" * 200_000 + "]" * 200_000 + "\n" + json.dumps({"role": "me", "text": "深い行のあと", "turn": "hY"}) + "\n")
+
+    got = start_with(deep)
+    check("入れ子が深すぎる行は飛ばし、ほかの行は戻る", (got.get("turns"), got.get("history")), (1, ["me"]))
 
     # ---- 記録が大きくなったら、一つ前の分だけ残して回す
     real_max = s.HERMES_LOG_MAX
