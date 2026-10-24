@@ -639,17 +639,53 @@ def hermes_agent() -> dict:
             "session": HERMES_SESSION, "status": "idle", "name": "hermes", "hub": HERMES_HUB, "hermes": True}
 
 
+# Hermes との会話の記録。Claude Code のセッションが自分で書く記録（JSONL）にあたるものを、本体が状態フォルダに書く。
+# 画面の履歴はここから描く（画面が閉じていた間の返答や報告も残る）。ハブかどうかに関係なく書く（Hermes の会話は HERMES_SESSION の1本）。
+# 1行に1件: me（ユーザーの発言）・ai（Hermes の返答。報告なら report と about）・note（自動通知の見出し）・error（届かなかった・返事が無かった）
+HERMES_LOG = STATE_DIR / "hermes-log.jsonl"
+HERMES_LOG_MAX = 8_000_000  # 超えたら hermes-log.1.jsonl に回す（一つ前の分だけ残す）
+
+
+def hermes_log(role: str, text: str, **extra):
+    try:
+        HERMES_LOG.parent.mkdir(parents=True, exist_ok=True)
+        if HERMES_LOG.exists() and HERMES_LOG.stat().st_size > HERMES_LOG_MAX:
+            HERMES_LOG.replace(HERMES_LOG.with_name("hermes-log.1.jsonl"))
+        with HERMES_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.time(), "role": role, "text": text, **extra}, ensure_ascii=False) + "\n")
+    except OSError:
+        traceback.print_exc()  # 記録できなくても、会話は止めない
+
+
+def hermes_records(tail_bytes: int = 2_000_000) -> list[dict]:
+    if not HERMES_LOG.exists():
+        return []
+    out = []
+    for line in read_lines(HERMES_LOG, tail_bytes=tail_bytes):
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("role"), str) and isinstance(d.get("text"), str):
+            out.append(d)
+    return out
+
+
+def hermes_history(limit: int = 40) -> list[dict]:
+    """画面に出す Hermes との会話。形は history() と同じ（role と text）。"""
+    return [{"role": d["role"], "text": d["text"]} for d in hermes_records() if d["role"] in ("me", "ai", "note", "error") and d["text"]][-limit:]
+
+
 # Hermes がハブのときの、ユーザーの発言と Hermes の返答の台帳。Claude Code のハブでは記録（JSONL）から読むものを、ここでは本体が直接持つ。
 # 承認に答える・閉じるの守り（「見たあとにユーザーが発言したか」「聞いたときの返答に問いがあるか」）はこの台帳で確かめる。自動通知は載せない。
+# 中身は上の記録にも書き、起動のときに記録から戻す（再起動で消えない。発言の ID は再起動をまたいでも重ならない）
 HERMES_TURNS: deque = deque(maxlen=50)  # (発言の ID, ユーザーの文, Hermes の返答)
-_hermes_turn_n = 0
 
 
 def hermes_turn_begin(text: str) -> str:
-    global _hermes_turn_n
-    _hermes_turn_n += 1
-    turn = f"h{_hermes_turn_n}"
+    turn = f"h{os.urandom(6).hex()}"
     HERMES_TURNS.append([turn, text, ""])
+    hermes_log("me", text, turn=turn)
     return turn
 
 
@@ -657,6 +693,44 @@ def hermes_turn_end(turn: str, reply: str):
     for row in HERMES_TURNS:
         if row[0] == turn:
             row[2] = reply
+    if reply:
+        hermes_log("ai", reply, turn=turn)
+
+
+def _load_hermes_turns():
+    rows: dict[str, list] = {}
+    for d in hermes_records():
+        turn = d.get("turn")
+        if not isinstance(turn, str):
+            continue
+        if d["role"] == "me":
+            rows[turn] = [turn, d["text"], ""]
+        elif d["role"] == "ai" and turn in rows:
+            rows[turn][2] = d["text"]
+    HERMES_TURNS.extend(rows.values())
+
+
+_load_hermes_turns()
+
+
+async def hermes_exchange(text: str) -> tuple[str, str]:
+    """Hermes に1往復し、発言と返事を記録する。(返事, 失敗の理由) を返す。
+    Hermes とのやり取りは同時に1件だけ（自動通知もこの順番を待つ）。"""
+    async with pane_lock(HERMES_PANE):
+        turn = hermes_turn_begin(text)  # 発言の台帳。承認に答える・閉じるの守りが「見たあとの発言か」を見る
+        try:
+            reply = await asyncio.to_thread(ask_hermes, text)
+        except Exception as e:
+            why = str(e) if isinstance(e, RuntimeError) else f"{type(e).__name__}: {e}"
+            if not isinstance(e, RuntimeError):
+                traceback.print_exc()
+            hermes_log("error", why[:300], turn=turn)
+            return "", why
+        hermes_turn_end(turn, reply)
+        if not reply:
+            hermes_log("error", "Hermes の返事が空でした", turn=turn)
+            return "", "Hermes の返事が空でした"
+        return reply, ""
 
 
 def hub_turns(n: int = 1) -> list[tuple[str, str]]:
@@ -715,7 +789,9 @@ def api_agents():
 
 @app.get("/api/history")
 def api_history(pane: str):
-    """選んだセッションの会話履歴。正本はそのセッション自身の記録(JSONL)。"""
+    """選んだセッションの会話履歴。正本はそのセッション自身の記録(JSONL)。Hermes は本体が書いた記録。"""
+    if pane == HERMES_PANE:
+        return JSONResponse({"source": "hermes", "messages": hermes_history()})
     agent = next((a for a in list_agents() if a["pane"] == pane), None)
     path = jsonl_path(agent) if agent else None
     if not path:
@@ -934,8 +1010,8 @@ async def ask(agent: dict, text: str) -> tuple[str, str]:
     if agent.get("hermes"):  # Hermes はコンテナの中の API サーバー。止まる（blocked）ことはない
         try:
             return "done", await asyncio.to_thread(ask_hermes, text)
-        except RuntimeError as e:
-            return "error", str(e)
+        except Exception as e:  # 待ちきれなかった（TimeoutError）なども、失敗として返す（報告の記録に残すため）
+            return "error", str(e) if isinstance(e, RuntimeError) else f"{type(e).__name__}: {e}"
     pane = agent["pane"]
     path = jsonl_path(agent)
     offset = path.stat().st_size if path and path.exists() else 0  # 新しいセッションは最初の発言まで記録が無い
@@ -1146,12 +1222,19 @@ async def report(d: dict, kind: str):
             if not now or now["status"] != "blocked":
                 hlog(f"報告を省略（もう止まっていない）: {label}")
                 return
+        if hub.get("hermes"):  # Claude Code のハブは自分の記録に残る。Hermes は本体が記録する（画面が無くても、あとで履歴に出る）
+            hermes_log("note", note[len(NOTE_PREFIX):].split("‖", 1)[0].strip(), about=label)
         REPORTING = True
         try:
             state, reply = await ask(hub, note)
         finally:
             REPORTING = False
         hlog(f"報告 {kind}: {label} → {state}（画面 {len(CLIENTS)}）", flush=True)
+        if hub.get("hermes"):
+            if state == "done" and reply.strip():
+                hermes_log("ai", reply, report=True, about=label)
+            else:
+                hermes_log("error", f"ハブから報告を受け取れませんでした: {_clip(reply, 200) or '返事が空でした'}", about=label)
         if state != "done" or not reply.strip():
             return
         clients = list(CLIENTS)
@@ -1529,18 +1612,16 @@ async def ws(sock: WebSocket):
                 await send(type="error", gone=True, text="Hermes は設定されていません（config.env の VL_HERMES_KEY）。選び直してください。")
                 return
             await send(type="status", text=("ハブ" if HERMES_HUB else "Hermes") + "に送りました。考え中…")
-            async with pane_lock(HERMES_PANE):  # ハブが自動通知に応答している最中なら、それが終わってから送る
-                turn = hermes_turn_begin(text)  # 発言の台帳。承認に答える・閉じるの守りが「見たあとの発言か」を見る
-                try:
-                    reply = await asyncio.to_thread(ask_hermes, text)
-                except RuntimeError as e:
-                    await send(type="error", text=str(e)[:300])
-                    return
-                hermes_turn_end(turn, reply)
-            if cancel.is_set():
+            # 画面が閉じても、止めても、Hermes の返事は最後まで待って記録する（Hermes は答えて覚えているので、記録が欠けると画面と食い違う）。
+            # ハブが自動通知に応答している最中なら、それが終わってから送る
+            job = asyncio.create_task(hermes_exchange(text))
+            _tasks.add(job)
+            job.add_done_callback(_tasks.discard)
+            reply, why = await asyncio.shield(job)
+            if why:
+                await send(type="error", text=why[:300])
                 return
-            if not reply:
-                await send(type="error", text="Hermes の返事が空でした")
+            if cancel.is_set():
                 return
             await send(type="reply", pane=pane, text=reply)
             await speak_to([client], reply, cancel)

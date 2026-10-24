@@ -127,7 +127,7 @@ function localPush(role, text) { if (threadSource !== 'none') return; try { loca
 function renderThread(msgs) {
   $('log').innerHTML = '';
   if (!msgs.length) sys('このセッションにはまだ会話がありません');
-  msgs.forEach(m => m.role === 'note' ? sys('通知: ' + m.text) : bubble(m.role, m.text)); // note = ハブへの自動通知（頼んだ件が片づいた等）
+  msgs.forEach(m => m.role === 'note' ? sys('通知: ' + m.text) : m.role === 'error' ? sys('⚠ ' + m.text) : bubble(m.role, m.text)); // note = ハブへの自動通知（頼んだ件が片づいた等）。error = Hermes に届かなかった・返事が無かった
 }
 async function loadThread() {
   const pane = $('agent').value; if (!pane) return;
@@ -136,7 +136,7 @@ async function loadThread() {
     const r = await (await fetch('/api/history?pane=' + encodeURIComponent(pane))).json();
     if (seq !== loadSeq) return; // 読み込み中に別のセッションへ切り替えた
     threadSource = r.source;
-    renderThread(r.source === 'jsonl' ? r.messages : localMsgs());
+    renderThread(r.source === 'none' ? localMsgs() : r.messages); // jsonl = セッション自身の記録、hermes = 本体が書いた Hermes との会話
   } catch (e) { if (seq === loadSeq) sys('履歴を読めませんでした'); }
 }
 
