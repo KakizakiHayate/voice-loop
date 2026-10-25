@@ -1015,6 +1015,7 @@ class Client:
         self.speaker: int | None = None  # この画面で選ばれている声
         self.voice = True  # この画面で読み上げるか（画面の 🔇 で切ると、返答は文字だけになる）
         self.visible = False  # この画面がいま見えているか。見えている画面が1つでもあれば、プッシュ通知は送らない（画面に声と文字で届くため）
+        self.seen = 0.0  # 画面が最後に様子（hello）を知らせてきた時刻
 
     async def send(self, **msg):
         await self.sock.send_text(json.dumps(msg, ensure_ascii=False))
@@ -1118,6 +1119,10 @@ PUSH_MAX_SUBS = 10
 PUSH_HOSTS = tuple(h.strip().lower() for h in (os.environ.get("VL_PUSH_HOSTS") or
                    "push.apple.com,fcm.googleapis.com,push.services.mozilla.com,notify.windows.com").split(",") if h.strip())
 BLOCKED_POLL = 10  # 承認・入力待ちを見に行く間隔（秒）
+# 画面は見えている間、20秒ごとに「見えている」を知らせ直す。これより長く途切れたら、見えていないとみなす
+# （iPhone で裏に回したとき、「隠れた」の知らせが届かないまま接続が残っても、通知が止まりっぱなしにならないように）
+VISIBLE_TTL = 45
+REPORT_PUSH_WAIT = 30  # 報告の通知は、ハブの報告をこれより長くは待たずに送る（ハブが話し中・応答が遅いとき）
 BLOCKED_NOTIFY_AFTER = float(os.environ.get("VL_BLOCKED_NOTIFY_AFTER", "60"))  # 止まってからこの秒数たっても止まったままなら知らせる
 _push_lock = threading.Lock()  # 鍵を作る・購読を書き換えるのは一度にひとつ
 
@@ -1159,14 +1164,30 @@ def push_subs() -> list[dict]:
     return [s for s in rows if push_problem(s) is None] if isinstance(rows, list) else []
 
 
+# 届け先の URL の形。配送サービスの URL に使われる文字だけを許す（@・\・空白・制御文字・# を含むものは、
+# 部品ごとに宛先の読み方が食い違い、許した名前と別の場所へ送られうるので断る）。番号は 443 だけ
+PUSH_URL = re.compile(r"https://(?P<host>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::443)?(?P<path>/[A-Za-z0-9._~/:?=&%+!-]*)", re.I)
+
+
+def _sent_host(endpoint: str) -> str:
+    """実際に送る部品（requests）が読む宛先の名前。読み方が食い違っていないかを確かめるため。"""
+    import requests
+
+    try:
+        return (urllib.parse.urlsplit(requests.Request("POST", endpoint).prepare().url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
 def push_problem(sub) -> str | None:
     """購読の形がおかしければ、その理由。"""
     if not isinstance(sub, dict) or not isinstance(sub.get("endpoint"), str) or not isinstance(sub.get("keys"), dict):
         return "購読の形が読めません"
-    url = urllib.parse.urlsplit(sub["endpoint"])
-    host = (url.hostname or "").lower()
-    if url.scheme != "https" or len(sub["endpoint"]) > 2000 or not any(host == h or host.endswith("." + h) for h in PUSH_HOSTS):
-        return f"知らない配送先です（{host or sub['endpoint'][:60]}）"
+    endpoint = sub["endpoint"]
+    m = PUSH_URL.fullmatch(endpoint) if len(endpoint) <= 2000 else None
+    host = m.group("host").lower() if m else ""
+    if not m or not any(host == h or host.endswith("." + h) for h in PUSH_HOSTS) or _sent_host(endpoint) != host:
+        return f"知らない配送先です（{_clip(endpoint, 60)}）"
     keys = sub["keys"]
     if not all(isinstance(keys.get(k), str) and 0 < len(keys[k]) <= 200 for k in ("p256dh", "auth")):
         return "購読の鍵が読めません"
@@ -1214,7 +1235,7 @@ def _push_send(subs: list[dict], payload: dict, urgency: str) -> tuple[int, list
 async def push_all(title: str, body: str, tag: str, urgency: str = "normal", only: list[dict] | None = None) -> str:
     """どの画面も見えていなければ、購読している端末すべてに知らせる。結果は sent / visible / none / failed / error。
     only を渡すと、見えている画面の有無に関係なく、その購読だけに送る（🔔 を押したときの試しの通知）。"""
-    if only is None and any(c.visible for c in CLIENTS):
+    if only is None and any(c.visible and time.time() - c.seen < VISIBLE_TTL for c in CLIENTS):
         return "visible"
     subs = only if only is not None else await asyncio.to_thread(push_subs)
     if not subs:
@@ -1378,6 +1399,8 @@ _load_tasks()
 def hub_tasks():
     """頼んだ件（新しい順）。画面の 📋 と hubctl tasks が読む。"""
     now = time.time()
+    if any(t["status"] not in TASK_ACTIVE and now - t["updated"] >= TASK_KEEP for t in TASKS.values()):
+        tasks_save()  # ほかの更新が無くても、3日を過ぎた件はここで外す
     rows = sorted(TASKS.values(), key=lambda t: t["started"], reverse=True)
     return JSONResponse([{**t, "age_minutes": int((now - t["started"]) // 60), "since_minutes": int((now - t["updated"]) // 60)} for t in rows])
 
@@ -1530,7 +1553,9 @@ PUSH_BY_REPORT = {"done": "完了しました", "more": "続きの返答があ�
 async def report(d: dict, kind: str):
     """頼んだ件の台帳を進め、ハブに報告させ、どの画面も見えていなければプッシュ通知でも知らせる。
     承認・入力待ち（blocked）の通知は watch_blocked が送る（見張りの無いセッションの分もまとめて、二重にしないため）。"""
-    task_set(d.get("task"), TASK_BY_REPORT[kind])
+    t = TASKS.get(d.get("task") or "")
+    if not (t and t["status"] == "done" and TASK_BY_REPORT[kind] != "done"):  # 報告済みの件は、その後の続きの作業で止まっても完了のまま
+        task_set(d.get("task"), TASK_BY_REPORT[kind])
     pushed = False
 
     def notify(outcome: str):
@@ -1539,12 +1564,25 @@ async def report(d: dict, kind: str):
         if pushed or kind not in PUSH_BY_REPORT:
             return
         pushed = True
-        tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）"}.get(outcome, "")
+        tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）",
+                "waiting": "（ハブの報告は、このあと届きます）"}.get(outcome, "")
         job = asyncio.create_task(push_all(f"{d['project']}｜{d['title']}", PUSH_BY_REPORT[kind] + tail, f"report-{d['pane']}"))
         _tasks.add(job)
         job.add_done_callback(_tasks.discard)
 
-    notify(await _report(d, kind, notify))
+    async def late():  # ハブが話し中・応答が遅いときも、通知は待たせすぎない
+        await asyncio.sleep(REPORT_PUSH_WAIT)
+        notify("waiting")
+
+    timer = asyncio.create_task(late())
+    try:
+        outcome = await _report(d, kind, notify)
+    except Exception:  # ハブへの報告が例外で終わっても、通知は送る
+        notify("failed")
+        raise
+    finally:
+        timer.cancel()
+    notify(outcome)
 
 
 async def _report(d: dict, kind: str, notify=lambda outcome: None) -> str:
@@ -2032,6 +2070,7 @@ async def ws(sock: WebSocket):
                     client.speaker = None if d.get("speaker") in (None, "") else int(d["speaker"])
                     client.voice = d.get("voice") is not False  # voice を送らない古い画面は、これまでどおり読み上げる
                     client.visible = d.get("visible") is True  # visible を送らない古い画面は、見えていないものとして扱う（通知を止めない）
+                    client.seen = time.time()
                     continue
                 if d["type"] == "stop":
                     cancel.set()

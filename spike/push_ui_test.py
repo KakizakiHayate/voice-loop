@@ -206,6 +206,21 @@ with sync_playwright() as pw:
     tasks_view(page, "WebKit:")
     b.close()
 
+    # ---------------- 連絡先の設定が誤っているとき ----------------
+    s.PUSH_SUBJECT = "https://example.com/some/path"
+    b = pw.chromium.launch()
+    ctx = b.new_context(viewport={"width": 390, "height": 844})
+    ctx.add_init_script(FAKE_PUSH)
+    page = ctx.new_page()
+    page.goto(BASE + "/")
+    page.wait_for_function("document.getElementById('conn').classList.contains('on')")
+    page.wait_for_timeout(800)
+    page.click("#bell")
+    check("連絡先（VL_PUSH_SUBJECT）の誤りは、🔔 を押したときに理由を出す", wait(lambda: any("VL_PUSH_SUBJECT" in t for t in sys_lines(page))), True)
+    check("連絡先が誤っている間は購読しない", page.evaluate("window.__push.calls"), [])
+    b.close()
+    s.PUSH_SUBJECT = "mailto:voice-loop@localhost"
+
     # ---------------- 購読の部品が無い、iPhone でもないブラウザ ----------------
     b = pw.chromium.launch()
     ctx = b.new_context()

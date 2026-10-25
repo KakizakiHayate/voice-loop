@@ -186,6 +186,12 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     check("一覧は新しい順", [r["id"] for r in rows], [t["id"] for t in sorted(s.TASKS.values(), key=lambda t: t["started"], reverse=True)])
     check("一覧には経過時間が付く", all(isinstance(r["age_minutes"], int) and isinstance(r["since_minutes"], int) for r in rows), True)
 
+    # ---- ほかの更新が無くても、終わってから3日を過ぎた件は一覧から外れる
+    s.TASKS["stale"] = {"id": "stale", "kind": "send", "pane": "w0:p0", "project": "p", "title": "古い", "text": "x",
+                        "started": time.time() - 5 * 86400, "updated": time.time() - 4 * 86400, "status": "done", "note": ""}
+    check("ほかの更新が無くても、3日を過ぎた件は一覧に出ない", "stale" in [r["id"] for r in c.get("/api/hub/tasks").json()], False)
+    check("ファイルからも外れる", "stale" in [t["id"] for t in json.loads(s.TASKS_FILE.read_text())], False)
+
     # ---- コンテナ（Hermes の hubctl）からは、鍵があれば読める
     dock = {"Host": "host.docker.internal:8790"}
     check("コンテナから鍵つきで読める", c.get("/api/hub/tasks", headers={**dock, "X-VL-Key": "k1"}).status_code, 200)

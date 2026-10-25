@@ -111,6 +111,13 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         ("知らない配送先（この Mac から任意の場所へ送る口にしない）", {**apple.sub, "endpoint": "https://evil.example.com/x"}),
         ("配送先に似せた名前", {**apple.sub, "endpoint": "https://web.push.apple.com.evil.example/x"}),
         ("内向きの名前", {**apple.sub, "endpoint": "https://127.0.0.1/x"}),
+        ("\\ と @ で宛先の読み方を食い違わせる（内向き）", {**apple.sub, "endpoint": "https://127.0.0.1\\@web.push.apple.com/x"}),
+        ("\\ と @ で宛先の読み方を食い違わせる（外向き）", {**apple.sub, "endpoint": "https://evil.example\\@web.push.apple.com/x"}),
+        ("利用者名つき", {**apple.sub, "endpoint": "https://user@web.push.apple.com/x"}),
+        ("443 以外の番号", {**apple.sub, "endpoint": "https://web.push.apple.com:8443/x"}),
+        ("改行入り", {**apple.sub, "endpoint": "https://web.push.apple.com/x\n"}),
+        ("空白入り", {**apple.sub, "endpoint": "https://web.push.apple.com/x y"}),
+        ("# つき", {**apple.sub, "endpoint": "https://web.push.apple.com/x#y"}),
         ("鍵が無い", {"endpoint": apple.sub["endpoint"], "keys": {"p256dh": "x"}}),
         ("鍵が長すぎる", {"endpoint": apple.sub["endpoint"], "keys": {"p256dh": "x" * 300, "auth": "y"}}),
         ("形が違う", "https://web.push.apple.com/x"),
@@ -119,6 +126,9 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         rr = c.post("/api/push/subscribe", json={"subscription": sub, "test": True})
         check(f"断る: {name}", (rr.status_code, rr.json()["ok"]), (400, False))
     check("断ったものは保存しない・送らない", (s.push_subs(), sent), ([], []))
+    real_forms = ["https://fcm.googleapis.com/fcm/send/dXk2:APA91bH-abc_def", "https://wns2-par02p.notify.windows.com/w/?token=BQYAAAB%2bXyz%3d",
+                  "https://updates.push.services.mozilla.com/wpush/v2/gAAAAABk-x_y", "https://web.push.apple.com:443/QGuQ"]
+    check("実際の配送サービスの URL の形は通す", [s.push_problem({**apple.sub, "endpoint": e}) for e in real_forms], [None] * 4)
 
     # ---------------- 登録と試しの通知（暗号化した中身） ----------------
     rr = c.post("/api/push/subscribe", json={"subscription": apple.sub, "test": True}).json()
@@ -150,7 +160,14 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         w.send_json({"type": "hello", "speaker": "0", "voice": True})
         time.sleep(0.3)
         check("visible を送らない古い画面は、見えていないものとして扱う", asyncio.run(s.push_all("p｜t", "完了しました", "report-x")), "sent")
-    check("登録したすべての端末に送る", sorted(x["url"] for x in sent), sorted([apple.sub["endpoint"], google.sub["endpoint"]] * 2))
+        s.VISIBLE_TTL = 0.5
+        w.send_json({"type": "hello", "speaker": "0", "voice": True, "visible": True})
+        time.sleep(0.2)
+        check("見えている知らせの直後は送らない", asyncio.run(s.push_all("p｜t", "完了しました", "report-x")), "visible")
+        time.sleep(0.6)
+        check("見えている知らせが途切れたら（裏に回ったことが届かなくても）送る", asyncio.run(s.push_all("p｜t", "完了しました", "report-x")), "sent")
+        s.VISIBLE_TTL = 45
+    check("登録したすべての端末に送る", sorted(x["url"] for x in sent), sorted([apple.sub["endpoint"], google.sub["endpoint"]] * 3))
     auds = {x["url"]: jwt_claims(x["headers"])["aud"] for x in sent}
     check("aud は送り先ごと（使い回さない）", auds[google.sub["endpoint"]], "https://fcm.googleapis.com")
     check("Google 側の中身も復号できる", google.open(next(x["data"] for x in sent if x["url"] == google.sub["endpoint"]))["body"], "完了しました")
@@ -192,8 +209,12 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
 # 壊れた購読のファイルでも止まらない
 s.PUSH_SUBS.write_text("{壊れている")
 check("購読のファイルが壊れていても、空として読む", s.push_subs(), [])
-s.PUSH_SUBS.write_text(json.dumps([{"endpoint": "https://evil.example.com/x", "keys": {"p256dh": "a", "auth": "b"}}, apple.sub]))
-check("ファイルに紛れた知らない配送先は使わない", [x["endpoint"] for x in s.push_subs()], [apple.sub["endpoint"]])
+s.PUSH_SUBS.write_text(json.dumps([{"endpoint": "https://evil.example.com/x", "keys": {"p256dh": "a", "auth": "b"}},
+                                   {**apple.sub, "endpoint": "https://127.0.0.1\\@web.push.apple.com/x"}, apple.sub]))
+check("ファイルに紛れた知らない配送先・読み方の食い違う届け先は使わない", [x["endpoint"] for x in s.push_subs()], [apple.sub["endpoint"]])
+sent.clear()
+asyncio.run(s.push_all("p｜t", "x", "t"))
+check("送るのも、確かめた届け先だけ", [x["url"] for x in sent], [apple.sub["endpoint"]])
 s.PUSH_SUBS.write_text(json.dumps([apple.sub]))
 
 # ---------------- 頼んだ件の報告と通知 ----------------
@@ -220,8 +241,10 @@ async def run_report(kind, hub_answer=("done", "片づきました"), agents=Non
 
     s.ask = fake_ask
     t0 = time.time()
-    await s.report(dict(D), kind)
-    await asyncio.gather(*list(s._tasks), return_exceptions=True)
+    try:
+        await s.report(dict(D), kind)
+    finally:  # 報告が例外で終わっても、裏で送る通知は最後まで待つ（本物の本体ではループが続くので送られる）
+        await asyncio.gather(*list(s._tasks), return_exceptions=True)
     return t0
 
 
@@ -253,6 +276,53 @@ asyncio.run(run_report("done", hub_answer=("error", "Hermes に届きません")
 check("ハブから報告を受け取れなくても、通知は送る", bodies(), ["完了しました（ハブから報告を受け取れませんでした）"])
 asyncio.run(run_report("done", agents=[]))
 check("ハブが居なくても、通知は送る", bodies(), ["完了しました（ハブが居ないので、声の報告はありません）"])
+
+
+async def raising_report(d, kind, notify=None):
+    raise TimeoutError("ハブの画面を読めませんでした")
+
+
+real_report = s._report
+s._report = raising_report
+try:
+    asyncio.run(run_report("done"))
+    raised = False
+except TimeoutError:
+    raised = True
+check("ハブへの報告が例外で終わっても、通知は1回送る（例外は見張りに返す）", (bodies(), raised), (["完了しました（ハブから報告を受け取れませんでした）"], True))
+s._report = real_report
+s.REPORT_PUSH_WAIT = 0.2
+
+
+async def slow_hub():
+    sent.clear()
+    s.list_agents = lambda: [HUB]
+
+    async def slow_ask(agent, text):
+        await asyncio.sleep(1.0)
+        return "done", "片づきました"
+
+    s.ask = slow_ask
+    t0 = time.time()
+    await s.report(dict(D), "done")
+    await asyncio.gather(*list(s._tasks), return_exceptions=True)
+    return t0
+
+
+t0 = asyncio.run(slow_hub())
+check("ハブの報告が遅いときは、待ちきらずに通知する（1回だけ）", (bodies(), round(sent[0]["at"] - t0, 1) < 0.9 if sent else None),
+      (["完了しました（ハブの報告は、このあと届きます）"], True))
+s.REPORT_PUSH_WAIT = 30
+
+# 報告済みの件は、その後の続きの作業で止まっても・見失っても、台帳では完了のまま
+tid = s.task_new({**D, "text": "x"}, "send")
+s.task_set(tid, "done")
+for k in ("blocked", "background", "gone"):
+    asyncio.run(s.report({**D, "task": tid}, k))
+check("報告済みの件は、そのあと止まっても・裏で作業しても・見失っても完了のまま", s.TASKS[tid]["status"], "done")
+tid2 = s.task_new({**D, "text": "y"}, "send")
+asyncio.run(s.report({**D, "task": tid2}, "blocked"))
+check("報告の前に止まった件は「止まっている」", s.TASKS[tid2]["status"], "blocked")
 s.CLIENTS.clear()
 
 # ---------------- 承認・入力待ち（watch_blocked） ----------------

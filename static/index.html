@@ -300,7 +300,7 @@ async function loadSpeakers() {
 }
 // ハブからの報告を、選んでいる声で届けてもらう。読み上げを切っていれば、音声を送らないでもらう
 // 画面が見えているかも知らせる（見えている画面があれば、本体はプッシュ通知を送らない）
-const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value, voice: !muted, visible: !document.hidden })); } catch {} };
+const hello = (visible = !document.hidden) => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value, voice: !muted, visible })); } catch {} };
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
 
 // ---------- 再生 ----------
@@ -375,7 +375,7 @@ showMute();
 const pushOK = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const onIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
-let swReg = null, pushKey = null, pushSub = null;
+let swReg = null, pushKey = null, pushSub = null, pushProblem = ''; // pushProblem = 本体が通知を用意できない理由（連絡先の設定の誤りなど）
 function showBell() {
   $('bell').hidden = !pushOK && !(onIOS && !standalone); // iPhone のブラウザで開いているときは、ホーム画面への追加を案内するために出す
   $('bell').setAttribute('aria-pressed', String(!!pushSub));
@@ -391,7 +391,7 @@ async function preparePush() {
   try {
     swReg = await navigator.serviceWorker.ready;
     pushSub = await swReg.pushManager.getSubscription(); showBell();
-    const r = await (await fetch('/api/push')).json(); if (r.ok) pushKey = r.key;
+    const r = await (await fetch('/api/push')).json(); if (r.ok) { pushKey = r.key; pushProblem = ''; } else { pushKey = null; pushProblem = r.reason || ''; }
     if (pushSub) await postJSON('/api/push/subscribe', { subscription: pushSub.toJSON() });
   } catch (e) { clog('push prepare failed: ' + e.name + ' ' + e.message); }
 }
@@ -404,7 +404,7 @@ $('bell').onclick = async () => {
     try { await postJSON('/api/push/unsubscribe', { endpoint }); sys('通知を切りました'); } catch { sys('通知を切りました（本体には届きませんでした。次に開いたときに整います）'); }
     $('bell').disabled = false; return;
   }
-  if (!swReg || !pushKey) { sys('通知の準備ができていません。少し待ってから、もう一度押してください'); preparePush(); return; }
+  if (!swReg || !pushKey) { sys(pushProblem ? '⚠ 通知を受け取れるようにできません: ' + pushProblem : '通知の準備ができていません。少し待ってから、もう一度押してください'); preparePush(); return; }
   $('bell').disabled = true;
   try {
     pushSub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushKey) }); // ここで許可を聞く
@@ -576,6 +576,8 @@ $('reload').onclick = async () => {
 };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // Mac に届かなくても画面は開けるように（sw.js）
 preparePush(); // 通知（🔔）の用意。sw.js が動きだしてから
+setInterval(() => { if (!document.hidden) hello(); }, 20000); // 見えている間は知らせ直す（裏に回ったことが届かなくても、本体は45秒で見えていないとみなす）
+window.addEventListener('pagehide', () => hello(false)); // 閉じる・裏に回るときに「見えていない」を知らせる
 document.addEventListener('visibilitychange', () => { hello(); if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
 window.addEventListener('online', () => connect());
 setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) { loadAgents(); ensureSpeakers(); } }, 20000);
