@@ -91,6 +91,9 @@ check("コンテナから X-Forwarded-For を偽っても、承認に答える�
 check("コンテナから: 鍵つきの hubctl の口は通す（名前そのまま）", inside("/api/hub/context", key=KEY), "200")
 check("コンテナから: 鍵つきの hubctl の口は通す（Host を偽っていても）", inside("/api/hub/context", host=SPOOF, key=KEY), "200")
 check("コンテナから: Host を偽っても、鍵なしの hubctl の口は断る", inside("/api/hub/context", host=SPOOF), "403")
+check("コンテナから Host を偽っても、提案を送る・見送る画面の口は断る",
+      (inside("/api/proposals/send", host=SPOOF, method="POST"), inside("/api/proposals/drop", host=SPOOF, key=KEY, method="POST")), ("403", "403"))
+check("コンテナから: 鍵つきなら、提案を読む hubctl の口は通す", inside("/api/hub/proposals", key=KEY), "200")
 ws = subprocess.run(["docker", "exec", "-u", "10000:10000", CONTAINER, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "10",
                      "-H", f"Host: {SPOOF}", "-H", "Connection: Upgrade", "-H", "Upgrade: websocket", "-H", "Sec-WebSocket-Version: 13",
                      "-H", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", f"http://host.docker.internal:{PORT}/ws"], capture_output=True, text=True, timeout=30).stdout.strip()
@@ -128,7 +131,8 @@ for r in s.app.routes:
 # （本体の一覧を期待値に使うと、誤って画面の口を足しても試験が気づかない）
 HUB_OPEN = {("GET", "/api/hub/sessions"), ("GET", "/api/hub/read"), ("GET", "/api/hub/screen"), ("GET", "/api/hub/tasks"),
             ("POST", "/api/hub/send"), ("POST", "/api/hub/answer"), ("POST", "/api/hub/spawn"), ("POST", "/api/hub/close"),
-            ("GET", "/api/hub/context"), ("POST", "/api/hub/remember"), ("POST", "/api/hub/forget")}
+            ("GET", "/api/hub/context"), ("POST", "/api/hub/remember"), ("POST", "/api/hub/forget"),
+            ("GET", "/api/hub/proposals")}  # 提案を読むだけ（0.11.0）。送る・見送るは画面の口で、コンテナには開かない
 check("本体の「コンテナに開く口」の一覧が、試験の側の一覧と同じ", (sorted(origin_guard.DOCKER_ALLOWED - HUB_OPEN), sorted(HUB_OPEN - origin_guard.DOCKER_ALLOWED)), ([], []))
 check("コンテナに開く口は、どれも本体に実在する", sorted(HUB_OPEN - set(ROUTES)), [])
 # 1 回の docker exec で、口ごとに 3 通り（名前を偽る・鍵なし／名前そのまま・鍵つき／名前を偽る・鍵つき）を呼ぶ

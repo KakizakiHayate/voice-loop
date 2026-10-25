@@ -45,7 +45,7 @@ _fields = {
     "sources": {"type": "array", "items": _source},
 }
 SCHEMA = {
-    "type": "object", "additionalProperties": False, "required": ["add", "update", "retire", "seen", "counts"],
+    "type": "object", "additionalProperties": False, "required": ["add", "update", "retire", "seen", "counts", "propose"],
     "properties": {
         "add": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["title", "now", "sources"], "properties": _fields}},
         "update": {"type": "array", "items": {"type": "object", "additionalProperties": False, "required": ["id"],
@@ -55,6 +55,15 @@ SCHEMA = {
         "seen": {"type": "array", "items": {"type": "string"}, "description": "今回読み終えた出どころの ID（録音・メール）"},
         "counts": {"type": "object", "additionalProperties": False, "required": ["read", "private", "unsure"], "properties": {
             "read": {"type": "integer"}, "private": {"type": "integer"}, "unsure": {"type": "integer"}}},
+        # 毎回返す（無ければ空）。中身は指示文に「提案」の節があるときだけ。本体が確かめて預かり、利用者が画面で送ったものだけがセッションに届く
+        "propose": {"type": "array", "description": "セッションへの指示の案（0〜1件。指示文の「提案」の節に従う。節が無ければ空）",
+                    "items": {"type": "object", "additionalProperties": False, "required": ["topic", "folder", "text", "why", "sources"], "properties": {
+                        "topic": {"type": "string", "description": "話題の id。今回 add で足す話題なら new:<add の中の位置（0 から）>"},
+                        "folder": {"type": "string", "description": "その話題のフォルダ（話題にフォルダが付いているものだけ）"},
+                        "text": {"type": "string", "description": "セッションへの指示（200 字まで。根拠の日付と出どころの名前を入れる）"},
+                        "why": {"type": "string", "description": "なぜ今か（60 字まで）"},
+                        "sources": {"type": "array", "items": {"type": "string"}, "description": "根拠の出どころ ID（その話題の出どころの中から）"},
+                    }}},
     },
 }
 

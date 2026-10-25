@@ -1,6 +1,6 @@
 id = "u-space.voice-loop"
 name = "voice-loop"
-version = "0.10.1"
+version = "0.11.0"
 min_herdr_version = "0.9.3"
 description = "口と耳だけで herdr のエージェントと話す。スマホからトランシーバー式で、全セッションを見渡すハブつき"
 platforms = ["macos"]
