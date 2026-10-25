@@ -51,6 +51,10 @@
   /* 読み上げの切り替え。読み上げの途中でもすぐ押せるよう、↻ より押せる広さを持たせる。切っている間は色をつけて、文字だけと分かるようにする */
   #mute { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
   #mute[aria-pressed="true"] { opacity:1; background:#5a1f1d; }
+  /* 通知（🔔）と頼んだ件（📋）。🔇 と同じ大きさ。入っている・開いている間は色をつける */
+  #bell, #tasksBtn { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
+  #bell[aria-pressed="true"] { opacity:1; background:#1f4a32; }
+  #tasksBtn[aria-pressed="true"] { opacity:1; background:#2a2f45; }
   #tap, #hubStart { display:none; margin-left:auto; border:none; border-radius:8px; background:var(--ok); color:#fff; font-size:13px; padding:4px 10px; }
   button:disabled, input:disabled { opacity:.35; }
   .row { display:flex; gap:8px; }
@@ -70,13 +74,23 @@
   .ask pre { margin:0; max-height:6em; overflow:auto; font:12px/1.5 ui-monospace, Menlo, monospace; color:#ccc; white-space:pre-wrap; word-break:break-all; }
   .ask button { flex:1; height:44px; font-size:15px; border:none; border-radius:10px; color:#fff; }
   .ask .allow { background:var(--ok); } .ask .allow.warn { background:var(--rec); } .ask .deny { background:var(--btn); }
+  /* 頼んだ件（📋 で開く） */
+  #tasks { flex:none; max-height:45dvh; overflow-y:auto; display:flex; flex-direction:column; gap:6px; padding:calc(8px + env(safe-area-inset-top)) 12px 8px; background:#14161d; border-bottom:1px solid #262a38; }
+  #tasks .top { display:flex; align-items:center; font-size:13px; color:#aab4d6; }
+  #tasks .top span { flex:1; }
+  #tasks .top button { border:none; background:none; color:var(--mute); font-size:15px; padding:2px 6px; }
+  .task { display:flex; flex-direction:column; gap:2px; padding:6px 10px; border:1px solid #2a2f45; border-radius:10px; background:#181b25; font-size:13px; }
+  .task .st { font-size:12px; color:#9fb0e0; }
+  .task.active .st { color:#e6c36a; } .task.done .st { color:var(--ok); } .task.bad .st { color:#e07a74; }
+  .task .what, .task .note { color:#bbb; font-size:12px; overflow-wrap:anywhere; }
 </style>
 </head>
 <body>
   <div id="asks"></div>
+  <div id="tasks" hidden><div class="top"><span>頼んだ件（ハブ経由で送った指示と、その見張り）</span><button id="tasksClose" aria-label="閉じる">✕</button></div><div id="taskList"></div></div>
   <div id="log"></div>
   <div id="bar">
-    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="mute" aria-pressed="false">🔇</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
+    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="tasksBtn" aria-pressed="false" aria-label="頼んだ件" title="頼んだ件">📋</button><button id="bell" aria-pressed="false" hidden>🔔</button><button id="mute" aria-pressed="false">🔇</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
     <form id="typedForm" class="row"><input id="typed" placeholder="文字で送る" autocomplete="off"><button id="send" type="submit">送る</button></form>
@@ -285,7 +299,8 @@ async function loadSpeakers() {
   hello(); applyTarget(); // つながったあとで一覧が届いたときも、選んでいる声をサーバーに知らせ、送れるようにする
 }
 // ハブからの報告を、選んでいる声で届けてもらう。読み上げを切っていれば、音声を送らないでもらう
-const hello = () => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value, voice: !muted })); } catch {} };
+// 画面が見えているかも知らせる（見えている画面があれば、本体はプッシュ通知を送らない）
+const hello = (visible = !document.hidden) => { try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', speaker: $('speaker').value, voice: !muted, visible })); } catch {} };
 $('speaker').onchange = e => { localStorage.setItem('vl.speaker', e.target.value); hello(); };
 
 // ---------- 再生 ----------
@@ -352,6 +367,92 @@ $('mute').onclick = () => {
   else { prime(); setStatus('読み上げを戻しました（次の返答から）'); } // タップの中で鳴らしておき、報告も鳴らせるようにする
 };
 showMute();
+
+// ---------- 通知（🔔） ----------
+// 画面を閉じていても、頼んだ件の報告や承認待ちを、この端末にプッシュ通知で届けてもらう。本体は、どの画面も見えていないときだけ送る。
+// iPhone はホーム画面に置いた画面でしか受け取れず、許可を聞けるのはボタンを押したときだけ。
+// 購読（届け先）はブラウザが持つ。開くたびに本体へ送り直す（本体が登録を失っていても戻る）
+const pushOK = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const onIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+let swReg = null, pushKey = null, pushSub = null, pushProblem = ''; // pushProblem = 本体が通知を用意できない理由（連絡先の設定の誤りなど）
+function showBell() {
+  $('bell').hidden = !pushOK && !(onIOS && !standalone); // iPhone のブラウザで開いているときは、ホーム画面への追加を案内するために出す
+  $('bell').setAttribute('aria-pressed', String(!!pushSub));
+  $('bell').title = pushSub ? '通知を切る（いまは画面を閉じていても届く）' : '通知を受け取る（画面を閉じていても、報告と承認待ちが届く）';
+  $('bell').setAttribute('aria-label', $('bell').title);
+}
+const postJSON = async (path, body) => (await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+function keyBytes(b64) { const s = atob(b64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - b64.length % 4) % 4)); return Uint8Array.from(s, c => c.charCodeAt(0)); }
+// 押す前に、鍵と仕組みの用意を済ませておく（iPhone は、押した操作のすぐ中で購読しないと許可を聞けない）
+async function preparePush() {
+  showBell();
+  if (!pushOK) return;
+  try {
+    swReg = await navigator.serviceWorker.ready;
+    pushSub = await swReg.pushManager.getSubscription(); showBell();
+    const r = await (await fetch('/api/push')).json(); if (r.ok) { pushKey = r.key; pushProblem = ''; } else { pushKey = null; pushProblem = r.reason || ''; }
+    if (pushSub) await postJSON('/api/push/subscribe', { subscription: pushSub.toJSON() });
+  } catch (e) { clog('push prepare failed: ' + e.name + ' ' + e.message); }
+}
+$('bell').onclick = async () => {
+  if (!pushOK) { sys(onIOS && !standalone ? '通知は、ホーム画面に追加した voice-loop で受け取れます（共有 → ホーム画面に追加 → そこから開いて 🔔）' : 'このブラウザでは通知を受け取れません'); return; }
+  if (pushSub) { // 切る
+    const endpoint = pushSub.endpoint; $('bell').disabled = true;
+    try { await pushSub.unsubscribe(); } catch {}
+    pushSub = null; showBell();
+    try { await postJSON('/api/push/unsubscribe', { endpoint }); sys('通知を切りました'); } catch { sys('通知を切りました（本体には届きませんでした。次に開いたときに整います）'); }
+    $('bell').disabled = false; return;
+  }
+  if (!swReg || !pushKey) { sys(pushProblem ? '⚠ 通知を受け取れるようにできません: ' + pushProblem : '通知の準備ができていません。少し待ってから、もう一度押してください'); preparePush(); return; }
+  $('bell').disabled = true;
+  try {
+    pushSub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(pushKey) }); // ここで許可を聞く
+  } catch (e) {
+    $('bell').disabled = false; clog('push subscribe failed: ' + e.name + ' ' + e.message);
+    sys(Notification.permission === 'denied' ? '通知が許可されていません。端末の設定（通知 → voice-loop）で許可してから、もう一度押してください' : '通知を受け取れるようにできませんでした: ' + e.message);
+    return;
+  }
+  showBell();
+  let r; try { r = await postJSON('/api/push/subscribe', { subscription: pushSub.toJSON(), test: true }); } catch { r = { ok: false, reason: '本体に届きません' }; }
+  $('bell').disabled = false;
+  if (!r.ok) { sys('⚠ 通知の届け先を本体に登録できませんでした: ' + r.reason); return; }
+  sys(r.test === 'sent' ? '通知を受け取れるようにしました。試しの通知を送りました' : '通知を受け取れるようにしました（試しの通知は送れませんでした: ' + r.test + '。本体のログを見てください）');
+};
+
+// ---------- 頼んだ件（📋） ----------
+// ハブ経由で送った指示・立てたセッション・答えた承認と、その見張りの状態。開いている間は 10 秒ごとに取り直す
+const TASK_STATUS = {
+  watching: ['見張り中', 'active'], background: ['裏で作業中', 'active'], blocked: ['承認・入力待ち', 'active'], done: ['完了（報告済み）', 'done'],
+  gone: ['セッションが見つからなくなった', 'bad'], closed: ['閉じた', ''], replaced: ['次の指示に引き継ぎ', ''],
+  timeout: ['見張り終了（片づかなかった）', 'bad'], failed: ['見張りが失敗', 'bad'], lost: ['見張りが切れた（本体が止まった）', 'bad'],
+};
+const TASK_KIND = { send: '指示', spawn: '立てて最初の指示', answer: '承認・質問への答え' };
+const clock = min => { const d = new Date(Date.now() - min * 60000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+let tasksTimer = null;
+async function loadTasks() {
+  const list = $('taskList');
+  let rows; try { rows = await (await fetch('/api/hub/tasks')).json(); } catch { list.textContent = '読めませんでした（接続を確かめてください）'; return; }
+  list.innerHTML = '';
+  if (!rows.length) { list.textContent = '頼んだ件はありません（終わった件は3日で消えます）'; return; }
+  for (const t of rows) {
+    const [label, cls] = TASK_STATUS[t.status] || [t.status, ''];
+    const el = document.createElement('div'); el.className = 'task' + (cls ? ' ' + cls : '');
+    const st = document.createElement('div'); st.className = 'st'; st.textContent = `${label}・${clock(t.since_minutes)}`;
+    const name = document.createElement('div'); name.textContent = `${t.project}｜${t.title}`;
+    const what = document.createElement('div'); what.className = 'what'; what.textContent = `${clock(t.age_minutes)} ${TASK_KIND[t.kind] || t.kind}${t.text ? '：' + t.text : ''}`;
+    el.append(st, name, what);
+    if (t.note) { const n = document.createElement('div'); n.className = 'note'; n.textContent = t.note; el.appendChild(n); }
+    list.appendChild(el);
+  }
+}
+function showTasks(open) {
+  $('tasks').hidden = !open; $('tasksBtn').setAttribute('aria-pressed', String(open));
+  clearInterval(tasksTimer); tasksTimer = null;
+  if (open) { loadTasks(); tasksTimer = setInterval(() => { if (!document.hidden) loadTasks(); }, 10000); }
+}
+$('tasksBtn').onclick = () => showTasks($('tasks').hidden);
+$('tasksClose').onclick = () => showTasks(false);
 
 // ---------- 通信 ----------
 // 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。
@@ -474,7 +575,10 @@ $('reload').onclick = async () => {
   finally { clearTimeout(timer); }
 };
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {}); // Mac に届かなくても画面は開けるように（sw.js）
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
+preparePush(); // 通知（🔔）の用意。sw.js が動きだしてから
+setInterval(() => { if (!document.hidden) hello(); }, 20000); // 見えている間は知らせ直す（裏に回ったことが届かなくても、本体は45秒で見えていないとみなす）
+window.addEventListener('pagehide', () => hello(false)); // 閉じる・裏に回るときに「見えていない」を知らせる
+document.addEventListener('visibilitychange', () => { hello(); if (!document.hidden) { connect(); ensureSpeakers(); loadAgents().then(() => { if ($('agent').value) loadThread(); }); } });
 window.addEventListener('online', () => connect());
 setInterval(() => { if (!document.hidden && document.activeElement !== $('agent')) { loadAgents(); ensureSpeakers(); } }, 20000);
 setInterval(() => { if (!document.hidden) loadAsks(); }, 5000); // 承認で止まっているセッションを、話し相手の画面のまま上に並べる

@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "anthropic>=1.0", "openai>=1.40"]
+# dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "anthropic>=1.0", "openai>=1.40", "pywebpush>=2.0"]
 # ///
 """voice-loop: トランシーバー式で herdr のエージェントと声で話す中継サーバー。
 
@@ -133,6 +133,7 @@ async def lifespan(_app):
     tasks = [
         asyncio.create_task(boot_ensure_hub()),  # サーバー起動時（= Mac の再起動後）にハブを立て直す
         asyncio.create_task(keep_gateway_token()),
+        asyncio.create_task(watch_blocked()),  # 承認・入力待ちになったセッションを、プッシュ通知で知らせる
     ]
     yield
     for task in tasks:
@@ -1013,6 +1014,8 @@ class Client:
         self.sock = sock
         self.speaker: int | None = None  # この画面で選ばれている声
         self.voice = True  # この画面で読み上げるか（画面の 🔇 で切ると、返答は文字だけになる）
+        self.visible = False  # この画面がいま見えているか。見えている画面が1つでもあれば、プッシュ通知は送らない（画面に声と文字で届くため）
+        self.seen = 0.0  # 画面が最後に様子（hello）を知らせてきた時刻
 
     async def send(self, **msg):
         await self.sock.send_text(json.dumps(msg, ensure_ascii=False))
@@ -1093,6 +1096,316 @@ async def speak_to(clients: list[Client], text: str, cancel: asyncio.Event):
     await each(lambda c: c.send(type="done", sentences=n))
 
 
+def write_json(path: Path, data):
+    """書きかけを残さないよう、一時ファイルに書いてから置き換える。中身は利用者だけが読める（0600）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+# ---------- プッシュ通知（画面を閉じていても、報告と承認待ちを知らせる） ----------
+# Web Push（VAPID）。届け先は、画面の 🔔 で許可した端末（ブラウザが持つ購読）。どの画面も見えていないときだけ送る。
+# 通知に載せるのは見出し（案件｜件名と、何が起きたか）だけ。本文や指示の中身は、開いてから読む。
+# 中身は端末の鍵で暗号化されるので、配送する Apple などは読めない
+PUSH_KEY_FILE = CONFIG_DIR / "push" / "vapid_private.pem"  # 作り直すと、それまでの購読は届かなくなる
+PUSH_SUBS = STATE_DIR / "push-subscriptions.json"
+# 配送の側が困ったときの連絡先（mailto: か、パスの無い https:）。配送サービスにはそのまま見える。未設定なら届かない宛先を名乗る
+PUSH_SUBJECT = os.environ.get("VL_PUSH_SUBJECT") or "mailto:voice-loop@localhost"
+PUSH_TTL = 6 * 3600  # 端末が圏外などで受け取れないとき、配送の側で待ってもらう上限
+PUSH_MAX_SUBS = 10
+# 送ってよい配送先（ブラウザの配送サービス）。購読の届け先を、この Mac から任意の場所へ送る口にしないため
+PUSH_HOSTS = tuple(h.strip().lower() for h in (os.environ.get("VL_PUSH_HOSTS") or
+                   "push.apple.com,fcm.googleapis.com,push.services.mozilla.com,notify.windows.com").split(",") if h.strip())
+BLOCKED_POLL = 10  # 承認・入力待ちを見に行く間隔（秒）
+# 画面は見えている間、20秒ごとに「見えている」を知らせ直す。これより長く途切れたら、見えていないとみなす
+# （iPhone で裏に回したとき、「隠れた」の知らせが届かないまま接続が残っても、通知が止まりっぱなしにならないように）
+VISIBLE_TTL = 45
+REPORT_PUSH_WAIT = 30  # 報告の通知は、ハブの報告をこれより長くは待たずに送る（ハブが話し中・応答が遅いとき）
+BLOCKED_NOTIFY_AFTER = float(os.environ.get("VL_BLOCKED_NOTIFY_AFTER", "60"))  # 止まってからこの秒数たっても止まったままなら知らせる
+_push_lock = threading.Lock()  # 鍵を作る・購読を書き換えるのは一度にひとつ
+
+
+def push_vapid():
+    """VAPID の鍵。無ければ作る（初めて 🔔 を押したとき）。"""
+    from py_vapid import Vapid02
+
+    with _push_lock:
+        if not PUSH_KEY_FILE.exists():
+            PUSH_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            PUSH_KEY_FILE.parent.chmod(0o700)
+            v = Vapid02()
+            v.generate_keys()
+            tmp = PUSH_KEY_FILE.with_name(PUSH_KEY_FILE.name + ".tmp")
+            v.save_key(str(tmp))
+            tmp.chmod(0o600)
+            tmp.replace(PUSH_KEY_FILE)
+        return Vapid02.from_file(str(PUSH_KEY_FILE))
+
+
+def push_public_key() -> str:
+    """画面が購読するときに渡す公開鍵（applicationServerKey。非圧縮の点を base64url で）。"""
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    raw = push_vapid().public_key.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint)
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def push_subs() -> list[dict]:
+    """保存している購読。読めなければ空（通知は届かないが、本体は止めない）。"""
+    try:
+        rows = json.loads(PUSH_SUBS.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RecursionError):
+        traceback.print_exc()
+        return []
+    return [s for s in rows if push_problem(s) is None] if isinstance(rows, list) else []
+
+
+# 届け先の URL の形。配送サービスの URL に使われる文字だけを許す（@・\・空白・制御文字・# を含むものは、
+# 部品ごとに宛先の読み方が食い違い、許した名前と別の場所へ送られうるので断る）。番号は 443 だけ
+PUSH_URL = re.compile(r"https://(?P<host>[a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::443)?(?P<path>/[A-Za-z0-9._~/:?=&%+!-]*)", re.I)
+
+
+def _sent_host(endpoint: str) -> str:
+    """実際に送る部品（requests）が読む宛先の名前。読み方が食い違っていないかを確かめるため。"""
+    import requests
+
+    try:
+        return (urllib.parse.urlsplit(requests.Request("POST", endpoint).prepare().url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def push_problem(sub) -> str | None:
+    """購読の形がおかしければ、その理由。"""
+    if not isinstance(sub, dict) or not isinstance(sub.get("endpoint"), str) or not isinstance(sub.get("keys"), dict):
+        return "購読の形が読めません"
+    endpoint = sub["endpoint"]
+    m = PUSH_URL.fullmatch(endpoint) if len(endpoint) <= 2000 else None
+    host = m.group("host").lower() if m else ""
+    if not m or not any(host == h or host.endswith("." + h) for h in PUSH_HOSTS) or _sent_host(endpoint) != host:
+        return f"知らない配送先です（{_clip(endpoint, 60)}）"
+    keys = sub["keys"]
+    if not all(isinstance(keys.get(k), str) and 0 < len(keys[k]) <= 200 for k in ("p256dh", "auth")):
+        return "購読の鍵が読めません"
+    return None
+
+
+def push_add(sub: dict):
+    with _push_lock:
+        rows = [s for s in push_subs() if s["endpoint"] != sub["endpoint"]]
+        rows.append({"endpoint": sub["endpoint"], "keys": {"p256dh": sub["keys"]["p256dh"], "auth": sub["keys"]["auth"]}, "added": time.time()})
+        write_json(PUSH_SUBS, rows[-PUSH_MAX_SUBS:])
+
+
+def push_drop(endpoints: list[str]):
+    with _push_lock:
+        rows = push_subs()
+        keep = [s for s in rows if s["endpoint"] not in endpoints]
+        if len(keep) != len(rows):
+            write_json(PUSH_SUBS, keep)
+
+
+def _push_send(subs: list[dict], payload: dict, urgency: str) -> tuple[int, list[str]]:
+    """購読ごとに送る。(届けた数, もう使えない購読の endpoint)。"""
+    from pywebpush import WebPushException, webpush
+
+    vapid = push_vapid()
+    sent, gone = 0, []
+    for s in subs:
+        host = urllib.parse.urlsplit(s["endpoint"]).hostname
+        try:
+            # vapid_claims は送るたびに作る（webpush が送り先ごとの aud を書き込むため、使い回すと別の配送先に合わない）
+            webpush(s, json.dumps(payload, ensure_ascii=False), vapid_private_key=vapid, vapid_claims={"sub": PUSH_SUBJECT},
+                    ttl=PUSH_TTL, headers={"Urgency": urgency}, timeout=10)
+            sent += 1
+        except WebPushException as e:
+            code = getattr(e.response, "status_code", None)
+            if code in (404, 410):  # 端末が購読をやめた・期限が切れた
+                gone.append(s["endpoint"])
+            print(f"[push] {host} に送れませんでした（{code}）: {str(e)[:160]}", flush=True)
+        except Exception as e:  # 通信の失敗など。ほかの端末には送り続ける
+            print(f"[push] {host} に送れませんでした: {type(e).__name__}: {str(e)[:160]}", flush=True)
+    return sent, gone
+
+
+async def push_all(title: str, body: str, tag: str, urgency: str = "normal", only: list[dict] | None = None) -> str:
+    """どの画面も見えていなければ、購読している端末すべてに知らせる。結果は sent / visible / none / failed / error。
+    only を渡すと、見えている画面の有無に関係なく、その購読だけに送る（🔔 を押したときの試しの通知）。"""
+    if only is None and any(c.visible and time.time() - c.seen < VISIBLE_TTL for c in CLIENTS):
+        return "visible"
+    subs = only if only is not None else await asyncio.to_thread(push_subs)
+    if not subs:
+        return "none"
+    payload = {"title": _clip(title, 80), "body": _clip(body, 120), "tag": tag, "url": "/"}
+    try:
+        sent, gone = await asyncio.to_thread(_push_send, subs, payload, urgency)
+        if gone:
+            await asyncio.to_thread(push_drop, gone)
+    except Exception:  # 鍵を読めないなど。知らせられないだけで、呼び出し側は止めない
+        traceback.print_exc()
+        return "error"
+    hlog(f"通知 {tag}: {sent}/{len(subs)} 件に送りました", flush=True)
+    return "sent" if sent else "failed"
+
+
+@app.get("/api/push")
+def api_push():
+    """画面が購読するための公開鍵と、いま登録されている端末の数。"""
+    try:
+        key = push_public_key()
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "reason": f"通知の鍵を用意できません: {type(e).__name__}"})
+    try:  # 連絡先の形は、送るときに使う部品（py_vapid）の決まりで確かめる。おかしければ、押した時点で分かるように
+        push_vapid().sign({"sub": PUSH_SUBJECT, "aud": "https://push.example"})
+    except Exception:
+        return JSONResponse({"ok": False, "reason": f"config.env の VL_PUSH_SUBJECT（{PUSH_SUBJECT}）の形が使えません。mailto:名前@ドメイン か、パスの無い https://ドメイン にしてください"})
+    return JSONResponse({"ok": True, "key": key, "count": len(push_subs())})
+
+
+@app.post("/api/push/subscribe")
+async def api_push_subscribe(body: dict):
+    """画面の 🔔 で許可した端末を登録する。test なら、その端末に試しの通知を送る（画面は開くたびに test なしで送り直す）。"""
+    sub = body.get("subscription")
+    why = push_problem(sub)
+    if why:
+        return JSONResponse({"ok": False, "reason": why}, status_code=400)
+    try:
+        await asyncio.to_thread(push_add, sub)
+    except OSError as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "reason": f"登録を書けませんでした: {type(e).__name__}"})
+    out = {"ok": True}
+    if body.get("test"):
+        out["test"] = await push_all("voice-loop", "通知を受け取れるようになりました", "test", only=[sub])
+    return JSONResponse(out)
+
+
+@app.post("/api/push/unsubscribe")
+async def api_push_unsubscribe(body: dict):
+    try:
+        await asyncio.to_thread(push_drop, [str(body.get("endpoint", ""))])
+    except OSError as e:
+        traceback.print_exc()
+        return JSONResponse({"ok": False, "reason": f"登録を書き換えられませんでした: {type(e).__name__}"})
+    return JSONResponse({"ok": True})
+
+
+async def watch_blocked():
+    """承認・入力待ちで止まったセッションを、プッシュ通知で知らせる。止まって BLOCKED_NOTIFY_AFTER 秒たっても止まったままのときに1回
+    （Mac の前で答えている承認では鳴らさない。止まったままなら重ねない）。ハブ経由で頼んだ件も、ここで知らせる
+    （見張りの報告はハブに話させるだけで、通知は送らない）。届け先が無い間は見に行かない。見始めたときにもう止まっていたものは知らせない。"""
+    held: dict[str, tuple[str, float, bool]] | None = None  # pane → (止まっているセッション, 止まりだしたのを見た時刻, 知らせたか)
+    while True:
+        await asyncio.sleep(BLOCKED_POLL)
+        try:
+            if not await asyncio.to_thread(push_subs):
+                held = None  # 届け先が登録されたら、その時点の様子から見始める
+                continue
+            agents = await asyncio.to_thread(list_agents)
+            if not agents:  # herdr に届かないと空で返る。ここで忘れると、戻ったときに止まったままのものを全部知らせ直すので、前の様子を残す
+                continue
+            first, before, held = held is None, held or {}, {}
+            for a in agents:
+                if a["status"] != "blocked":
+                    continue
+                p, who = a["pane"], a.get("session") or a["cwd"]
+                old = before.get(p)
+                who, since, told = old if old and old[0] == who else (who, time.time(), first)
+                if not told and time.time() - since >= BLOCKED_NOTIFY_AFTER:
+                    told = True  # 見えている画面があって送らなかったときも（その画面の上に承認の欄が出ている）
+                    name = "ハブ" if a["hub"] else f"{a['cwd'].rsplit('/', 1)[-1]}｜{a['title']}"
+                    await push_all(name, "承認・入力待ちで止まっています", f"blocked-{p}", urgency="high")
+                held[p] = (who, since, told)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            traceback.print_exc()
+
+
+# ---------- 頼んだ件の台帳（画面の 📋 と hubctl tasks） ----------
+# ハブ経由で送った指示・立てたセッション・答えた承認と、その見張りの状態。見張りはメモリの中だけなので、
+# 本体が止まると黙って消える。台帳は状態フォルダに書き、次に起動したとき「見張りが切れた」と分かるようにする
+TASKS_FILE = STATE_DIR / "delegations.json"
+TASK_KEEP = 3 * 86400  # 終わった件を残す期間
+TASK_MAX = 100
+TASK_ACTIVE = {"watching", "background", "blocked"}  # 見張りが続いている状態
+TASK_FIELDS = {"id": str, "kind": str, "pane": str, "project": str, "title": str, "text": str, "started": (int, float),
+               "updated": (int, float), "status": str, "note": str}
+TASKS: dict[str, dict] = {}
+
+
+def tasks_save():
+    """残す範囲（動いている件はすべて。終わった件は3日以内で、合わせて最大100件になるまで新しい順に）に絞って書く。書けなくても止めない。"""
+    now = time.time()
+    rows = sorted(TASKS.values(), key=lambda t: t["started"], reverse=True)
+    active = [t for t in rows if t["status"] in TASK_ACTIVE]
+    ended = [t for t in rows if t["status"] not in TASK_ACTIVE and now - t["updated"] < TASK_KEEP][:max(0, TASK_MAX - len(active))]
+    rows = sorted(active + ended, key=lambda t: t["started"], reverse=True)
+    TASKS.clear()
+    TASKS.update({t["id"]: t for t in rows})
+    try:
+        write_json(TASKS_FILE, rows)
+    except OSError:
+        traceback.print_exc()
+
+
+def task_new(d: dict, kind: str) -> str:
+    tid, now = os.urandom(6).hex(), time.time()
+    TASKS[tid] = {"id": tid, "kind": kind, "pane": d["pane"], "project": d["project"], "title": d["title"], "text": _clip(d["text"], 300),
+                  "started": now, "updated": now, "status": "watching", "note": ""}
+    tasks_save()
+    return tid
+
+
+def task_set(tid: str | None, status: str, note: str = ""):
+    """件の状態を進める。変わらなければ書かない。"""
+    t = TASKS.get(tid or "")
+    if not t or (t["status"], t["note"]) == (status, note or t["note"]):
+        return
+    t["status"], t["updated"] = status, time.time()
+    if note:
+        t["note"] = note
+    tasks_save()
+
+
+def _load_tasks():
+    """起動のとき、台帳を戻す。見張りの途中だった件は、もう誰も見ていないので「見張りが切れた」にする。"""
+    try:
+        rows = json.loads(TASKS_FILE.read_text())
+    except FileNotFoundError:
+        return
+    except (OSError, ValueError, RecursionError):
+        traceback.print_exc()
+        return
+    for t in rows if isinstance(rows, list) else []:
+        if not (isinstance(t, dict) and all(isinstance(t.get(k), ty) for k, ty in TASK_FIELDS.items())):
+            continue  # 壊れた件は飛ばす
+        t = {k: t[k] for k in TASK_FIELDS}
+        if t["status"] in TASK_ACTIVE:
+            t["status"], t["updated"], t["note"] = "lost", time.time(), "本体が止まったので、見張りが切れました"
+        TASKS[t["id"]] = t
+    tasks_save()
+
+
+_load_tasks()
+
+
+@app.get("/api/hub/tasks")
+async def hub_tasks():
+    """頼んだ件（新しい順）。画面の 📋 と hubctl tasks が読む。
+    台帳を書き換えるのはすべてイベントループの上（見張りと同じ）。別のスレッドで動かすと、見張りが足した件を片づけで消しうる"""
+    now = time.time()
+    if any(t["status"] not in TASK_ACTIVE and now - t["updated"] >= TASK_KEEP for t in TASKS.values()):
+        tasks_save()  # ほかの更新が無くても、3日を過ぎた件はここで外す
+    rows = sorted(TASKS.values(), key=lambda t: t["started"], reverse=True)
+    return JSONResponse([{**t, "age_minutes": int((now - t["started"]) // 60), "since_minutes": int((now - t["updated"]) // 60)} for t in rows])
+
+
 # ---------- ハブ経由で頼んだ件の見張りと報告 ----------
 TASK_DONE = re.compile(r"<tool-use-id>([^<]+)</tool-use-id>")
 WATCHING: dict[str, int] = {}  # セッションごとの、動いている見張りの数
@@ -1137,7 +1450,9 @@ def delegation_state(path: Path, offset: int, text: str) -> tuple[bool, str, boo
     return found, "\n\n".join(final or turn), superseded, bool(background)
 
 
-def start_watch(d: dict):
+def start_watch(d: dict, kind: str = "send"):
+    """見張りを始め、頼んだ件の台帳に載せる。kind は send（指示）・spawn（立てて最初の指示）・answer（承認・質問への答え）。"""
+    d["task"] = task_new(d, kind)
     task = asyncio.create_task(watch_delegation(d))
     _tasks.add(task)
     task.add_done_callback(_tasks.discard)
@@ -1151,6 +1466,8 @@ async def watch_delegation(d: dict):
     except Exception:
         hlog(f"見張りが失敗: {d['project']}｜{d['title']}", flush=True)
         traceback.print_exc()
+        if TASKS.get(d.get("task") or "", {}).get("status") != "done":
+            task_set(d.get("task"), "failed", "見張りの途中で失敗しました（本体のログを見てください）")
     finally:
         WATCHING[d["pane"]] -= 1
 
@@ -1167,12 +1484,18 @@ async def _watch_delegation(d: dict):
     while time.time() < deadline:
         await asyncio.sleep(3 if reported is None else 5)
         if WATCH_GEN.get(d["pane"]) != d["gen"]:
+            if reported is None:
+                task_set(d.get("task"), "replaced", "同じセッションに次の指示が送られたので、見張りはそちらの件に移りました")
             return  # 同じセッションに新しい指示が送られた。見張りは最新の1つに任せる（古い件の名前で通知を重ねない）
         a = next((x for x in await asyncio.to_thread(list_agents) if x["pane"] == d["pane"] and x["cwd"] == d["cwd"]), None)
         if not a:  # ハブがユーザーの許可で閉じたものは、知らせない
+            if reported is None and d["pane"] in CLOSED:
+                task_set(d.get("task"), "closed", "ハブが閉じました")
             return await report(d, "gone") if reported is None and d["pane"] not in CLOSED else None
         if a["status"] == "working":
             saw_working, told_blocked, quiet = True, False, 0
+            if TASKS.get(d.get("task") or "", {}).get("status") in ("blocked", "background"):  # 答えてもらった・裏の作業から戻った
+                task_set(d.get("task"), "watching")
             continue
         path = jsonl_path(a)
         has = bool(path and path.exists())
@@ -1211,6 +1534,7 @@ async def _watch_delegation(d: dict):
         now = (last_turn_id(path), last_exchange(read_lines(path, tail_bytes=600_000))[1]) if has else None
         if now and LAST_DONE.get(d["pane"]) == now:  # 重ねて頼んだ件が、先に報告した返答の中で片づいていた
             hlog(f"報告を省略（先に報告した返答に含まれる）: {label}", flush=True)
+            task_set(d.get("task"), "done", "同じセッションへの前の件と、まとめて報告しました")
             return
         if now:
             LAST_DONE[d["pane"]] = now
@@ -1219,16 +1543,72 @@ async def _watch_delegation(d: dict):
             return  # 記録で追えない件は、続きも見分けられないのでここまで
         reported = reply
     hlog(f"見張りを終了（{WATCH_TIMEOUT // 3600}時間）: {label}", flush=True)
+    if reported is None:
+        task_set(d.get("task"), "timeout", f"{WATCH_TIMEOUT // 3600}時間たっても片づかなかったので、見張りをやめました")
+
+
+TASK_BY_REPORT = {"done": "done", "more": "done", "background": "background", "blocked": "blocked", "gone": "gone"}
+PUSH_BY_REPORT = {"done": "完了しました", "more": "続きの返答がありました", "background": "裏で作業を続けています", "gone": "セッションが見つからなくなりました"}
 
 
 async def report(d: dict, kind: str):
-    """ハブに自動通知を送り、ハブの報告を、開いている画面へ声で届ける。画面が無ければ履歴に残るだけ。"""
+    """頼んだ件の台帳を進め、ハブに報告させ、どの画面も見えていなければプッシュ通知でも知らせる。
+    承認・入力待ち（blocked）の通知は watch_blocked が送る（見張りの無いセッションの分もまとめて、二重にしないため）。"""
+    t = TASKS.get(d.get("task") or "")
+    if not (t and t["status"] == "done" and TASK_BY_REPORT[kind] != "done"):  # 報告済みの件は、その後の続きの作業で止まっても完了のまま
+        task_set(d.get("task"), TASK_BY_REPORT[kind])
+    st = {"settled": False, "job": None, "next": None}  # settled = 送った（か、届け先が無い・送れなかった）ので、もう送らない
+
+    async def send(outcome: str):
+        tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）",
+                "waiting": "（ハブの報告は、このあと届きます）"}.get(outcome, "")
+        while True:
+            r = await push_all(f"{d['project']}｜{d['title']}", PUSH_BY_REPORT[kind] + tail, f"report-{d['pane']}")
+            if r != "visible":
+                st["settled"] = True
+                return
+            if not st["next"]:  # 画面が見えていて送らなかった。あとでハブの報告ができたとき、もう一度確かめる
+                return
+            outcome, st["next"] = st["next"], None
+            tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）"}.get(outcome, "")
+
+    def notify(outcome: str):
+        """1件につき1回送る。ハブの報告ができた時点で（読み上げを待たずに）、送るのは裏で（声を遅らせない）。
+        画面が見えていて送らなかったときは、次の機会（30秒の時点 → ハブの報告ができた時点）にもう一度確かめる"""
+        if st["settled"] or kind not in PUSH_BY_REPORT:
+            return
+        if st["job"] and not st["job"].done():
+            st["next"] = outcome  # 送っている途中。画面が見えていて送らなかったら、これでもう一度確かめる
+            return
+        st["job"] = job = asyncio.create_task(send(outcome))
+        _tasks.add(job)
+        job.add_done_callback(_tasks.discard)
+
+    async def late():  # ハブが話し中・応答が遅いときも、通知は待たせすぎない
+        await asyncio.sleep(REPORT_PUSH_WAIT)
+        notify("waiting")
+
+    timer = asyncio.create_task(late())
+    try:
+        outcome = await _report(d, kind, notify)
+    except Exception:  # ハブへの報告が例外で終わっても、通知は送る
+        notify("failed")
+        raise
+    finally:
+        timer.cancel()
+    notify(outcome)
+
+
+async def _report(d: dict, kind: str, notify=lambda outcome: None) -> str:
+    """ハブに自動通知を送り、ハブの報告を、開いている画面へ声で届ける。画面が無ければ履歴に残るだけ。
+    結果は ok / no_hub（ハブが居ない）/ failed（ハブから報告を受け取れなかった）/ skipped（もう止まっていない）。
+    notify は、ハブの報告を受け取れた時点で（読み上げる前に）呼ぶ。"""
     global REPORTING
     label = _clip(f"{d['project']}｜{d['title']}", 80)
     hub = hermes_agent() if HERMES_HUB and HERMES_KEY else next((a for a in await asyncio.to_thread(list_agents) if a["hub"]), None)
     if not hub:
         hlog(f"報告できません（ハブが居ない）: {label} {kind}", flush=True)
-        return
+        return "no_hub"
     headline, todo = {"done": ("が完了しました", f"hubctl read {d['pane']} で結果を確かめ、"),
                       "more": ("に続きの返答がありました", f"先ほど報告した件の続きです。hubctl read {d['pane']} で確かめ、"),
                       "background": ("は裏で作業を続けています", f"しばらくたっても結果が出ていません。hubctl read {d['pane']} で様子を確かめ、まだ動いていることを一言で、"),
@@ -1245,7 +1625,7 @@ async def report(d: dict, kind: str):
             now = next((a for a in await asyncio.to_thread(list_agents) if a["pane"] == d["pane"]), None)
             if not now or now["status"] != "blocked":
                 hlog(f"報告を省略（もう止まっていない）: {label}")
-                return
+                return "skipped"
         saved = True  # Hermes のとき、見出しと報告を記録に書けたか
         if hub.get("hermes"):  # Claude Code のハブは自分の記録に残る。Hermes は本体が記録する（画面が無くても、あとで履歴に出る）
             saved = hermes_log("note", note[len(NOTE_PREFIX):].split("‖", 1)[0].strip(), about=label)
@@ -1267,7 +1647,8 @@ async def report(d: dict, kind: str):
                     except Exception:
                         pass
         if state != "done" or not reply.strip():
-            return
+            return "failed"
+        notify("ok")
         clients = list(CLIENTS)
         for c in clients:
             try:
@@ -1276,10 +1657,11 @@ async def report(d: dict, kind: str):
                 clients.remove(c)
         if clients:
             await speak_to(clients, reply, asyncio.Event())
+        return "ok"
 
 
-async def dispatch(a: dict, text: str) -> dict:
-    """セッションに指示を送り、片づくまでの見張りを始める。"""
+async def dispatch(a: dict, text: str, kind: str = "send") -> dict:
+    """セッションに指示を送り、片づくまでの見張りを始める（頼んだ件の台帳にも載せる）。"""
     pane, project = a["pane"], a["cwd"].rsplit("/", 1)[-1]
     path = jsonl_path(a)
     offset = path.stat().st_size if path and path.exists() else 0
@@ -1290,7 +1672,7 @@ async def dispatch(a: dict, text: str) -> dict:
         return {"ok": False, "reason": err}
     WATCH_GEN[pane] = WATCH_GEN.get(pane, 0) + 1  # このセッションの、これより前の見張りは引き上げさせる
     start_watch({"pane": pane, "cwd": a["cwd"], "project": project, "title": a["title"], "text": text, "offset": offset,
-                 "was_working": a["status"] == "working", "gen": WATCH_GEN[pane]})
+                 "was_working": a["status"] == "working", "gen": WATCH_GEN[pane]}, kind)
     return {"ok": True, "project": project, "title": a["title"], "was_working": a["status"] == "working"}
 
 
@@ -1395,7 +1777,7 @@ async def hub_answer(body: dict):
         path = jsonl_path(a)
         start_watch({"pane": pane, "cwd": a["cwd"], "project": project, "title": a["title"], "text": "", "generic": True,
                      "offset": path.stat().st_size if path and path.exists() else 0, "was_working": True,
-                     "gen": WATCH_GEN.setdefault(pane, 0)})
+                     "gen": WATCH_GEN.setdefault(pane, 0)}, "answer")
     return JSONResponse({"ok": True, "project": project, "title": a["title"], "said": said})
 
 
@@ -1550,7 +1932,7 @@ async def hub_spawn(body: dict):
     out = {"ok": True, "pane": r["pane"], "project": project, "model": model, "sent": False}
     if text:
         a = next((x for x in await asyncio.to_thread(list_agents) if x["pane"] == r["pane"]), None)
-        sent = await dispatch(a, text) if a else {"ok": False, "reason": "起動したセッションが見つかりません"}
+        sent = await dispatch(a, text, "spawn") if a else {"ok": False, "reason": "起動したセッションが見つかりません"}
         out["sent"], out["send_error"] = sent["ok"], None if sent["ok"] else sent.get("reason")
     return JSONResponse(out)
 
@@ -1698,9 +2080,11 @@ async def ws(sock: WebSocket):
                 break
             if msg.get("text") is not None:
                 d = json.loads(msg["text"])
-                if d["type"] == "hello":  # 画面が選んでいる声と、読み上げるか（ハブからの報告を、その声で届けるため）。🔇 を押すたびにも届く
+                if d["type"] == "hello":  # 画面が選んでいる声と、読み上げるか（ハブからの報告を、その声で届けるため）。🔇 を押すたび・画面が隠れる／見えるたびにも届く
                     client.speaker = None if d.get("speaker") in (None, "") else int(d["speaker"])
                     client.voice = d.get("voice") is not False  # voice を送らない古い画面は、これまでどおり読み上げる
+                    client.visible = d.get("visible") is True  # visible を送らない古い画面は、見えていないものとして扱う（通知を止めない）
+                    client.seen = time.time()
                     continue
                 if d["type"] == "stop":
                     cancel.set()

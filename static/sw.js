@@ -6,6 +6,7 @@
 // 更新したのに古い画面が出続けることを避けるため。
 // 扱うのは画面（/ を開く操作）と SHELL のファイルだけ。/api と /ws には手を出さない（一覧や会話を古い写しで答えない）。
 // 写しに残すのは、転送されていない 200 だけ（ほかのページへの転送や失敗の応答を、画面として残さない）。
+// プッシュ通知も受け持つ（本体が、どの画面も見えていないときに送る見出し）。押すと voice-loop を前に出す（無ければ開く）。
 const CACHE = 'voice-loop-shell-v1';
 const SHELL = [
   '/',
@@ -57,4 +58,21 @@ self.addEventListener('fetch', e => {
       return (await caches.match(key)) || net; // 写しが無い（初めて開いた）ときは、Mac の返事を待つ
     }
   })());
+});
+
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch {}
+  e.waitUntil(self.registration.showNotification(d.title || 'voice-loop', {
+    body: d.body || '', tag: d.tag || undefined, renotify: !!d.tag, icon: '/static/icons/icon-192.png', data: { url: d.url || '/' },
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const open = list.find(c => new URL(c.url).origin === self.location.origin);
+    return open ? open.focus() : self.clients.openWindow(url);
+  }));
 });
