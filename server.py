@@ -3036,4 +3036,5 @@ async def ws(sock: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=os.environ.get("VL_HOST", "127.0.0.1"), port=int(os.environ.get("VL_PORT", "8790")))
+    # proxy_headers を切る: 接続元を X-Forwarded-For で書き換えさせない（コンテナが偽った値で、接続のもとの確かめを外せないように。origin_guard）
+    uvicorn.run(app, host=os.environ.get("VL_HOST", "127.0.0.1"), port=int(os.environ.get("VL_PORT", "8790")), proxy_headers=False)
