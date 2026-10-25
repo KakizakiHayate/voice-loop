@@ -51,10 +51,11 @@
   /* 読み上げの切り替え。読み上げの途中でもすぐ押せるよう、↻ より押せる広さを持たせる。切っている間は色をつけて、文字だけと分かるようにする */
   #mute { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
   #mute[aria-pressed="true"] { opacity:1; background:#5a1f1d; }
-  /* 通知（🔔）と頼んだ件（📋）。🔇 と同じ大きさ。入っている・開いている間は色をつける */
-  #bell, #tasksBtn { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
+  /* 通知（🔔）・頼んだ件（📋）・いまの状況（💡）。🔇 と同じ大きさ。入っている・開いている間は色をつける */
+  #bell, #tasksBtn, #sitBtn { flex:none; border:none; border-radius:8px; background:none; font-size:17px; line-height:1; padding:6px 9px; margin:-6px 0; opacity:.45; }
   #bell[aria-pressed="true"] { opacity:1; background:#1f4a32; }
   #tasksBtn[aria-pressed="true"] { opacity:1; background:#2a2f45; }
+  #sitBtn[aria-pressed="true"] { opacity:1; background:#3a3420; }
   #tap, #hubStart { display:none; margin-left:auto; border:none; border-radius:8px; background:var(--ok); color:#fff; font-size:13px; padding:4px 10px; }
   button:disabled, input:disabled { opacity:.35; }
   .row { display:flex; gap:8px; }
@@ -83,14 +84,34 @@
   .task .st { font-size:12px; color:#9fb0e0; }
   .task.active .st { color:#e6c36a; } .task.done .st { color:var(--ok); } .task.bad .st { color:#e07a74; }
   .task .what, .task .note { color:#bbb; font-size:12px; overflow-wrap:anywhere; }
+  /* いまの状況（💡 で開く） */
+  #situation { flex:none; max-height:55dvh; overflow-y:auto; display:flex; flex-direction:column; gap:6px; padding:calc(8px + env(safe-area-inset-top)) 12px 8px; background:#17150f; border-bottom:1px solid #3a3420; }
+  #situation .top { display:flex; align-items:center; font-size:13px; color:#d8c88f; }
+  #situation .top span { flex:1; }
+  #situation .top button { border:none; background:none; color:var(--mute); font-size:15px; padding:2px 6px; }
+  #sitBody { display:flex; flex-direction:column; gap:6px; }
+  #sitBody h4 { margin:6px 0 0; font-size:12px; font-weight:600; color:#c9b77a; }
+  .sitHead { display:flex; align-items:center; gap:8px; font-size:12px; color:#bbb; }
+  .sitHead span { flex:1; }
+  .sitHead button, #factForm button { border:none; border-radius:8px; background:#3a3420; color:var(--fg); font-size:13px; padding:5px 10px; }
+  .topic { display:flex; flex-direction:column; gap:2px; padding:6px 10px; border:1px solid #3a3420; border-radius:10px; background:#1d1a12; font-size:13px; }
+  .topic .now, .topic .nx { color:#ccc; font-size:12px; overflow-wrap:anywhere; }
+  .sitMeta { color:var(--mute); font-size:12px; overflow-wrap:anywhere; }
+  .sitMeta.bad { color:#e07a74; }
+  .fact { display:flex; align-items:flex-start; gap:6px; font-size:13px; overflow-wrap:anywhere; }
+  .fact span { flex:1; min-width:0; }
+  .fact button { flex:none; border:none; background:none; color:var(--mute); font-size:15px; padding:0 6px; }
+  #factForm { display:flex; gap:6px; }
+  #factText { flex:1; min-width:0; font-size:16px; padding:6px 10px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; }
 </style>
 </head>
 <body>
   <div id="asks"></div>
   <div id="tasks" hidden><div class="top"><span>頼んだ件（ハブ経由で送った指示と、その見張り）</span><button id="tasksClose" aria-label="閉じる">✕</button></div><div id="taskList"></div></div>
+  <div id="situation" hidden><div class="top"><span>いまの状況（録音・予定・メールから）</span><button id="sitClose" aria-label="閉じる">✕</button></div><div id="sitBody"></div><form id="factForm"><input id="factText" placeholder="覚えてほしいこと（打った文のまま覚えます）" maxlength="150" autocomplete="off"><button type="submit">覚える</button></form></div>
   <div id="log"></div>
   <div id="bar">
-    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="tasksBtn" aria-pressed="false" aria-label="頼んだ件" title="頼んだ件">📋</button><button id="bell" aria-pressed="false" hidden>🔔</button><button id="mute" aria-pressed="false">🔇</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
+    <div id="status"><span id="conn" class="dot"></span><span id="statusText">接続中…</span><button id="hubStart">ハブを起動</button><button id="tap">▶ タップして再生</button><button id="sitBtn" aria-pressed="false" aria-label="いまの状況" title="いまの状況">💡</button><button id="tasksBtn" aria-pressed="false" aria-label="頼んだ件" title="頼んだ件">📋</button><button id="bell" aria-pressed="false" hidden>🔔</button><button id="mute" aria-pressed="false">🔇</button><button id="reload" aria-label="最新の画面を読み込み直す" title="最新の画面を読み込み直す">↻</button></div>
     <div class="row"><select id="agent" aria-label="セッション"></select><select id="speaker" aria-label="声"></select></div>
     <div class="row"><button id="talk">タップして話す</button><button id="stop">停止</button></div>
     <form id="typedForm" class="row"><input id="typed" placeholder="文字で送る" autocomplete="off"><button id="send" type="submit">送る</button></form>
@@ -451,8 +472,76 @@ function showTasks(open) {
   clearInterval(tasksTimer); tasksTimer = null;
   if (open) { loadTasks(); tasksTimer = setInterval(() => { if (!document.hidden) loadTasks(); }, 10000); }
 }
-$('tasksBtn').onclick = () => showTasks($('tasks').hidden);
+$('tasksBtn').onclick = () => { showSituation(false); showTasks($('tasks').hidden); };
 $('tasksClose').onclick = () => showTasks(false);
+
+// ---------- いまの状況（💡） ----------
+// 録音・予定・メールから拾う役がまとめた話題と、覚えていること（ここで足す・× で忘れる）。開いている間は 15 秒ごとに取り直す
+const stamp = ts => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+const node = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+let sitTimer = null;
+async function loadSituation() {
+  const box = $('sitBody');
+  let d; try { d = await (await fetch('/api/situation')).json(); } catch { box.textContent = '読めませんでした（接続を確かめてください）'; return; }
+  box.innerHTML = '';
+  const head = node('div', 'sitHead');
+  head.appendChild(node('span', null, !d.enabled ? '拾う役は切ってあります（config.env の VL_INTAKE=1 で動きます）'
+    : (d.last_ok ? `最終更新 ${stamp(d.last_ok)}` : 'まだ一度もまとめていません') + (d.running ? '・まとめ中…' : '')));
+  if (d.enabled) {
+    const b = node('button', null, d.running ? 'まとめ中…' : 'いま拾う'); b.disabled = d.running;
+    b.onclick = async () => {
+      b.disabled = true;
+      let r; try { r = await postJSON('/api/situation/run', {}); } catch { r = { ok: false, reason: '本体に届きません' }; }
+      if (!r.ok) sys('いま拾うを始められませんでした: ' + r.reason);
+      setTimeout(loadSituation, 1500);
+    };
+    head.appendChild(b);
+  }
+  box.appendChild(head);
+  box.appendChild(node('h4', null, `覚えていること（${d.facts.length}）`));
+  for (const f of d.facts) {
+    const row = node('div', 'fact'); row.appendChild(node('span', null, `[${f.n}] ${f.text}`));
+    const x = node('button', null, '×'); x.setAttribute('aria-label', `${f.n}番を忘れる`);
+    x.onclick = async () => { x.disabled = true; try { await postJSON('/api/facts/delete', { n: f.n }); } catch { sys('忘れられませんでした（本体に届きません）'); } loadSituation(); };
+    row.appendChild(x); box.appendChild(row);
+  }
+  box.appendChild(node('h4', null, `話題（${d.topics.length}）`));
+  if (!d.topics.length) box.appendChild(node('div', 'sitMeta', 'まだありません'));
+  for (const t of d.topics) {
+    const c = node('div', 'topic');
+    c.appendChild(node('div', null, t.title + (t.folder ? `（${t.folder}）` : '')));
+    c.appendChild(node('div', 'now', t.now));
+    if (t.next || t.until) c.appendChild(node('div', 'nx', '次: ' + (t.next || '—') + (t.until ? `（予定 ${t.until}）` : '')));
+    const labels = (t.sources || []).slice(-3).map(s => s.label).filter(Boolean).join('、');
+    c.appendChild(node('div', 'sitMeta', `最後に動いた日 ${t.moved}` + (labels ? `・${labels}` : '')));
+    box.appendChild(c);
+  }
+  if (d.faded.length) {
+    box.appendChild(node('h4', null, '最近外れた話題'));
+    for (const f of d.faded) box.appendChild(node('div', 'sitMeta', `${f.title}（${f.reason}・${stamp(f.at)}）`));
+  }
+  if (d.runs.length) {
+    box.appendChild(node('h4', null, '最近の回'));
+    for (const r of d.runs) {
+      const what = r.ok ? `成功（足す ${r.added || 0}・直す ${r.updated || 0}・外す ${(r.retired || 0) + (r.faded || 0)}・読んだ ${r.read ?? '?'}・私用 ${r.private ?? 0}）` : '失敗: ' + r.why;
+      box.appendChild(node('div', 'sitMeta' + (r.ok ? '' : ' bad'), `${stamp(r.at)} ${what}` + (r.denied && r.denied.length ? `・止めた道具 ${r.denied.join('、')}` : '') + (r.missing && r.missing.length ? `・見えなかった連携 ${r.missing.join('、')}` : '')));
+    }
+  }
+}
+function showSituation(open) {
+  $('situation').hidden = !open; $('sitBtn').setAttribute('aria-pressed', String(open));
+  clearInterval(sitTimer); sitTimer = null;
+  if (open) { loadSituation(); sitTimer = setInterval(() => { if (!document.hidden) loadSituation(); }, 15000); }
+}
+$('sitBtn').onclick = () => { showTasks(false); showSituation($('situation').hidden); };
+$('sitClose').onclick = () => showSituation(false);
+$('factForm').onsubmit = async ev => {
+  ev.preventDefault();
+  const text = $('factText').value.trim(); if (!text) return;
+  let r; try { r = await postJSON('/api/facts', { text }); } catch { r = { ok: false, reason: '本体に届きません' }; }
+  if (r.ok) $('factText').value = ''; else sys('覚えられませんでした: ' + r.reason);
+  loadSituation();
+};
 
 // ---------- 通信 ----------
 // 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。

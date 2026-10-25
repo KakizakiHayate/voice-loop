@@ -98,6 +98,11 @@ def scaffold(uv: str) -> list[str]:
         if not (hub / name).exists():
             shutil.copy(ROOT / "templates/hub" / name, hub / name)
             made.append(f"ハブへの指示文 {hub / name}")
+    guide = CONFIG / "intake/instructions.md"  # 拾う役（いまの状況をまとめる）への指示文。config.env の VL_INTAKE=1 で使う
+    if not guide.exists():
+        guide.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / "templates/intake/instructions.md", guide)
+        made.append(f"拾う役への指示文 {guide}")
     # ハブは自分の作業フォルダから ./hubctl を呼ぶ。本体の場所は入れ直しで変わるので、毎回書き直す
     wrapper = hub / "hubctl"
     wrapper.write_text(f'#!/bin/sh\nexec "{uv}" run --quiet --script "{ROOT / "hubctl"}" "$@"\n')
