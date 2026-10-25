@@ -85,6 +85,9 @@ check("コンテナから X-Forwarded-For を偽っても、承認に答える�
 check("コンテナから: 鍵つきの hubctl の口は通す（名前そのまま）", inside("/api/hub/context", key=KEY), "200")
 check("コンテナから: 鍵つきの hubctl の口は通す（Host を偽っていても）", inside("/api/hub/context", host=SPOOF, key=KEY), "200")
 check("コンテナから: Host を偽っても、鍵なしの hubctl の口は断る", inside("/api/hub/context", host=SPOOF), "403")
+check("コンテナから Host を偽っても、提案を送る・見送る画面の口は断る",
+      (inside("/api/proposals/send", host=SPOOF, method="POST"), inside("/api/proposals/drop", host=SPOOF, key=KEY, method="POST")), ("403", "403"))
+check("コンテナから: 鍵つきなら、提案を読む hubctl の口は通す", inside("/api/hub/proposals", key=KEY), "200")
 ws = subprocess.run(["docker", "exec", "-u", "10000:10000", CONTAINER, "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-m", "10",
                      "-H", f"Host: {SPOOF}", "-H", "Connection: Upgrade", "-H", "Upgrade: websocket", "-H", "Sec-WebSocket-Version: 13",
                      "-H", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", f"http://host.docker.internal:{PORT}/ws"], capture_output=True, text=True, timeout=30).stdout.strip()
