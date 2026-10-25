@@ -150,6 +150,10 @@ asked()
 say("はい")
 s.REPORTING = True
 check("自動通知への応答中は閉じない", close(confirmed=True), ("reporting", []))
+reason = lambda r: json.loads(asyncio.run(r).body).get("reason", "通ってしまった")
+during = {"送る": reason(s.hub_send({"pane": "w9:p1", "text": "テスト"})), "答える": reason(s.hub_answer({"pane": "w9:p1", "answer": "yes"})),
+          "立てる": reason(s.hub_spawn({"project": "x", "text": "テスト"})), "覚える": reason(s.hub_remember()), "忘れる": reason(s.hub_forget())}
+check("自動通知への応答中は、送る・答える・立てる・覚える・忘れるも断る", during, dict.fromkeys(during, "reporting"))
 s.REPORTING = False
 fail["herdr"] = True
 check("herdr が閉じられなかったら、閉じた印を残さない", (close(confirmed=True), "w9:p1" in s.CLOSED), (("herdr", ["w9:p1"]), False))
