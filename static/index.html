@@ -98,6 +98,16 @@
   .topic .now, .topic .nx { color:#ccc; font-size:12px; overflow-wrap:anywhere; }
   .sitMeta { color:var(--mute); font-size:12px; overflow-wrap:anywhere; }
   .sitMeta.bad { color:#e07a74; }
+  .prop { display:flex; flex-direction:column; gap:4px; padding:8px 10px; border:1px solid #6b5a2a; border-radius:10px; background:#241f12; font-size:13px; }
+  .prop .text { overflow-wrap:anywhere; white-space:pre-wrap; }
+  .prop .risky { color:#e0a874; font-size:12px; }
+  .prop .acts { display:flex; flex-wrap:wrap; gap:6px; }
+  .prop .acts button { border:none; border-radius:8px; background:#3a3420; color:var(--fg); font-size:13px; padding:6px 12px; }
+  .prop .acts button.go { background:#6b5a2a; }
+  .prop .acts button.sure { background:#b8862e; color:#111; font-weight:600; }
+  #sitNote { font-size:12px; color:#d8c88f; overflow-wrap:anywhere; }
+  #sitNote.bad { color:#e07a74; }
+  #situation details summary { font-size:12px; color:#c9b77a; cursor:pointer; }
   .fact { display:flex; align-items:flex-start; gap:6px; font-size:13px; overflow-wrap:anywhere; }
   .fact span { flex:1; min-width:0; }
   .fact button { flex:none; border:none; background:none; color:var(--mute); font-size:15px; padding:0 6px; }
@@ -448,7 +458,7 @@ const TASK_STATUS = {
   gone: ['セッションが見つからなくなった', 'bad'], closed: ['閉じた', ''], replaced: ['次の指示に引き継ぎ', ''],
   timeout: ['見張り終了（片づかなかった）', 'bad'], failed: ['見張りが失敗', 'bad'], lost: ['見張りが切れた（本体が止まった）', 'bad'],
 };
-const TASK_KIND = { send: '指示', spawn: '立てて最初の指示', answer: '承認・質問への答え' };
+const TASK_KIND = { send: '指示', spawn: '立てて最初の指示', answer: '承認・質問への答え', proposal: '提案から' };
 const clock = min => { const d = new Date(Date.now() - min * 60000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 let tasksTimer = null;
 async function loadTasks() {
@@ -480,9 +490,55 @@ $('tasksClose').onclick = () => showTasks(false);
 const stamp = ts => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
 const node = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 let sitTimer = null;
+// 提案: 「送る」は2段（押すと確かめが出て、もう一度押して送る）。確かめの途中と送っている途中は、15 秒ごとの描き直しをしない
+let sitHold = false, sitNote = null;
+const PROP_CLOSED = { sent: '送った', dropped: '見送った', expired: '期限で消えた', stale: '古くなった', replaced: '入れ替わった', failed: '送れていない', unknown: '送れたか分からない' };
+const PROP_FAIL = {
+  changed: '提案が変わっていました。読み直しました', closed: 'この提案はもう閉じています（期限・話題の変化など）', no_such: 'この提案はもうありません',
+  sending: 'この提案は送っている途中です', no_projects_dir: 'セッションを立てる場所が設定されていません（config.env の VL_PROJECTS_DIR）',
+  no_project: 'フォルダが見つかりません。送っていません', not_started: 'セッションを立てられませんでした。もう一度押せます',
+  trust: 'セッションは立ちましたが「このフォルダを信頼しますか」で止まっています。そのタブで答えてから、要ればハブに送り直しを頼んでください',
+  start_failed: 'セッションは立てましたが、起動できず、指示は送れていません。様子を見て、要ればハブに頼んでください',
+  send_failed: 'セッションは立てましたが、指示は送れていません。様子を見て、要ればハブに頼んでください',
+  stale: 'セッションは立てましたが、そのあいだに話題の中身が変わったので、指示は送っていません',
+  unknown: '送れたか分かりません。📋 やセッションの様子を見てください',
+};
+function proposalCard(p) {
+  const c = node('div', 'prop');
+  const left = Math.max(1, Math.ceil((p.expires * 1000 - Date.now()) / 3600000));
+  c.appendChild(node('div', null, `[${p.n}] ${p.folder}`));
+  c.appendChild(node('div', 'sitMeta', `なぜ今: ${p.why}・` + (p.state === 'sending' ? '送っている途中' : `あと${left}時間で消えます`)));
+  c.appendChild(node('div', 'text', p.text));
+  if (p.risky) c.appendChild(node('div', 'risky', '取り消しにくい操作（送信・公開・削除・本番など）にかかわる語を含みます。中身をよく読んでから送ってください'));
+  if (p.state !== 'open') return c;
+  const acts = node('div', 'acts');
+  const go = node('button', 'go', '送る'), no = node('button', null, '見送る');
+  let timer = null;
+  const reset = () => { clearTimeout(timer); sitHold = false; go.className = 'go'; go.textContent = '送る'; };
+  go.onclick = async () => {
+    if (!go.classList.contains('sure')) {  // 1段目: 確かめを出す。10 秒で戻る
+      sitHold = true; go.className = 'sure'; go.textContent = `${p.folder} に新しいセッションを立てて送る`;
+      timer = setTimeout(reset, 10000); return;
+    }
+    clearTimeout(timer); go.disabled = no.disabled = true; go.textContent = '送っています…（立てるのに1分ほど）';
+    let r; try { r = await postJSON('/api/proposals/send', { n: p.n, v: p.v }); } catch { r = { ok: false, reason: 'unknown' }; }
+    const where = r.pane ? `（立てたセッション: ${p.folder} のワークスペースの「ハブが起動」のタブ・${r.pane}）` : '';
+    sitNote = r.ok ? [`提案 ${p.n} を送りました: ${r.project} に新しいセッションを立てました（📋 で見張っています）`, false]
+      : [`提案 ${p.n}: ` + (PROP_FAIL[r.reason] || r.reason) + (r.why ? `（${r.why}）` : '') + where, true];
+    sys(sitNote[0]); sitHold = false; loadSituation();
+  };
+  no.onclick = async () => {
+    reset(); no.disabled = true;
+    try { await postJSON('/api/proposals/drop', { n: p.n }); } catch { sys('見送れませんでした（本体に届きません）'); }
+    loadSituation();
+  };
+  acts.append(go, no); c.appendChild(acts);
+  return c;
+}
 async function loadSituation() {
   const box = $('sitBody');
   let d; try { d = await (await fetch('/api/situation')).json(); } catch { box.textContent = '読めませんでした（接続を確かめてください）'; return; }
+  if (sitHold) return;  // 読んでいるあいだに「送る」が押された
   box.innerHTML = '';
   const head = node('div', 'sitHead');
   head.appendChild(node('span', null, !d.enabled ? '拾う役は切ってあります（config.env の VL_INTAKE=1 で動きます）'
@@ -498,6 +554,22 @@ async function loadSituation() {
     head.appendChild(b);
   }
   box.appendChild(head);
+  if (sitNote) { const n = node('div', sitNote[1] ? 'bad' : null, sitNote[0]); n.id = 'sitNote'; box.appendChild(n); }
+  if (d.proposals.length) {
+    box.appendChild(node('h4', null, `提案（${d.proposals.length}）— 送ると、そのフォルダに新しいセッションを立てて頼みます。放っておけば消えます`));
+    for (const p of d.proposals) box.appendChild(proposalCard(p));
+  }
+  if (d.closed.length) {
+    const det = document.createElement('details');
+    det.appendChild(node('summary', null, `閉じた提案（${d.closed.length}）`));
+    for (const p of d.closed) {
+      const task = p.task_status ? `・頼んだ件: ${p.task_status === 'expired' ? '記録の保存期間外' : (TASK_STATUS[p.task_status] || [p.task_status])[0]}` : '';
+      det.appendChild(node('div', 'sitMeta' + (['failed', 'unknown'].includes(p.state) ? ' bad' : ''),
+        `${stamp(p.closed_at || p.at)} ${PROP_CLOSED[p.state] || p.state}｜${p.folder}：${p.text}` + (p.note ? `（${p.note}）` : '')
+        + (p.pane ? `・セッション: ${p.folder} の「ハブが起動」のタブ（${p.pane}）` : '') + task));
+    }
+    box.appendChild(det);
+  }
   box.appendChild(node('h4', null, `覚えていること（${d.facts.length}）`));
   for (const f of d.facts) {
     const row = node('div', 'fact'); row.appendChild(node('span', null, `[${f.n}] ${f.text}`));
@@ -523,7 +595,7 @@ async function loadSituation() {
   if (d.runs.length) {
     box.appendChild(node('h4', null, '最近の回'));
     for (const r of d.runs) {
-      const what = r.ok ? `成功（足す ${r.added || 0}・直す ${r.updated || 0}・外す ${(r.retired || 0) + (r.faded || 0)}・読んだ ${r.read ?? '?'}・私用 ${r.private ?? 0}）` : '失敗: ' + r.why;
+      const what = r.ok ? `成功（足す ${r.added || 0}・直す ${r.updated || 0}・外す ${(r.retired || 0) + (r.faded || 0)}・読んだ ${r.read ?? '?'}・私用 ${r.private ?? 0}` + (r.proposed ? `・提案 ${r.proposed}` : '') + '）' : '失敗: ' + r.why;
       box.appendChild(node('div', 'sitMeta' + (r.ok ? '' : ' bad'), `${stamp(r.at)} ${what}` + (r.denied && r.denied.length ? `・止めた道具 ${r.denied.join('、')}` : '') + (r.missing && r.missing.length ? `・見えなかった連携 ${r.missing.join('、')}` : '')));
     }
   }
@@ -531,7 +603,8 @@ async function loadSituation() {
 function showSituation(open) {
   $('situation').hidden = !open; $('sitBtn').setAttribute('aria-pressed', String(open));
   clearInterval(sitTimer); sitTimer = null;
-  if (open) { loadSituation(); sitTimer = setInterval(() => { if (!document.hidden) loadSituation(); }, 15000); }
+  if (!open) { sitHold = false; sitNote = null; }
+  if (open) { loadSituation(); sitTimer = setInterval(() => { if (!document.hidden && !sitHold) loadSituation(); }, 15000); }
 }
 $('sitBtn').onclick = () => { showTasks(false); showSituation($('situation').hidden); };
 $('sitClose').onclick = () => showSituation(false);

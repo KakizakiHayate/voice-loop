@@ -184,7 +184,7 @@ check("使わない連携は丸ごと外す", ("mcp__claude_ai_Slack" in deny, "
 check("利用者の設定で許可済みの送る道具も外す（許可リストにあるものは外さない）", ("mcp__claude_ai_Slack__slack_send_message" in deny, "mcp__claude_ai_Plaud__list_files" in deny), (True, False))
 hook = json.loads(arg(a, "--settings"))["hooks"]["PreToolUse"][0]
 check("見張りのフックは全部の道具にかかり、動かなくても通さない形", (hook["matcher"], "intake_hook.py" in hook["hooks"][0]["command"], "exit 2" in hook["hooks"][0]["command"]), ("*", True, True))
-check("結果は決まった形（--json-schema）で受け取る", json.loads(arg(a, "--json-schema"))["required"], ["add", "update", "retire", "seen", "counts"])
+check("結果は決まった形（--json-schema）で受け取る", json.loads(arg(a, "--json-schema"))["required"], ["add", "update", "retire", "seen", "counts", "propose"])
 check("会話を残さない・費用の上限", ("--no-session-persistence" in a, arg(a, "--max-budget-usd")), (True, "1.00"))
 check("拾う役の環境には herdr の印を渡さず、許可リストを渡す", run_call["env"], ["VL_INTAKE_ALLOW"])
 p = run_call["prompt"]
