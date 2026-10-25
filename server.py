@@ -1396,8 +1396,9 @@ _load_tasks()
 
 
 @app.get("/api/hub/tasks")
-def hub_tasks():
-    """頼んだ件（新しい順）。画面の 📋 と hubctl tasks が読む。"""
+async def hub_tasks():
+    """頼んだ件（新しい順）。画面の 📋 と hubctl tasks が読む。
+    台帳を書き換えるのはすべてイベントループの上（見張りと同じ）。別のスレッドで動かすと、見張りが足した件を片づけで消しうる"""
     now = time.time()
     if any(t["status"] not in TASK_ACTIVE and now - t["updated"] >= TASK_KEEP for t in TASKS.values()):
         tasks_save()  # ほかの更新が無くても、3日を過ぎた件はここで外す
@@ -1556,17 +1557,30 @@ async def report(d: dict, kind: str):
     t = TASKS.get(d.get("task") or "")
     if not (t and t["status"] == "done" and TASK_BY_REPORT[kind] != "done"):  # 報告済みの件は、その後の続きの作業で止まっても完了のまま
         task_set(d.get("task"), TASK_BY_REPORT[kind])
-    pushed = False
+    st = {"settled": False, "job": None, "next": None}  # settled = 送った（か、届け先が無い・送れなかった）ので、もう送らない
 
-    def notify(outcome: str):
-        """1件につき1回。ハブの報告ができた時点で（読み上げを待たずに）送る。送るのは裏で（声を遅らせない）"""
-        nonlocal pushed
-        if pushed or kind not in PUSH_BY_REPORT:
-            return
-        pushed = True
+    async def send(outcome: str):
         tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）",
                 "waiting": "（ハブの報告は、このあと届きます）"}.get(outcome, "")
-        job = asyncio.create_task(push_all(f"{d['project']}｜{d['title']}", PUSH_BY_REPORT[kind] + tail, f"report-{d['pane']}"))
+        while True:
+            r = await push_all(f"{d['project']}｜{d['title']}", PUSH_BY_REPORT[kind] + tail, f"report-{d['pane']}")
+            if r != "visible":
+                st["settled"] = True
+                return
+            if not st["next"]:  # 画面が見えていて送らなかった。あとでハブの報告ができたとき、もう一度確かめる
+                return
+            outcome, st["next"] = st["next"], None
+            tail = {"no_hub": "（ハブが居ないので、声の報告はありません）", "failed": "（ハブから報告を受け取れませんでした）"}.get(outcome, "")
+
+    def notify(outcome: str):
+        """1件につき1回送る。ハブの報告ができた時点で（読み上げを待たずに）、送るのは裏で（声を遅らせない）。
+        画面が見えていて送らなかったときは、次の機会（30秒の時点 → ハブの報告ができた時点）にもう一度確かめる"""
+        if st["settled"] or kind not in PUSH_BY_REPORT:
+            return
+        if st["job"] and not st["job"].done():
+            st["next"] = outcome  # 送っている途中。画面が見えていて送らなかったら、これでもう一度確かめる
+            return
+        st["job"] = job = asyncio.create_task(send(outcome))
         _tasks.add(job)
         job.add_done_callback(_tasks.discard)
 

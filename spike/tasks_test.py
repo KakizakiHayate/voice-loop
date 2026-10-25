@@ -191,6 +191,18 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
                         "started": time.time() - 5 * 86400, "updated": time.time() - 4 * 86400, "status": "done", "note": ""}
     check("ほかの更新が無くても、3日を過ぎた件は一覧に出ない", "stale" in [r["id"] for r in c.get("/api/hub/tasks").json()], False)
     check("ファイルからも外れる", "stale" in [t["id"] for t in json.loads(s.TASKS_FILE.read_text())], False)
+    import inspect
+    check("一覧を読むのは見張りと同じイベントループの上（別のスレッドで台帳を書き換えない）", inspect.iscoroutinefunction(s.hub_tasks), True)
+    s.TASKS["stale2"] = {**s.TASKS.get("stale", {}), "id": "stale2", "kind": "send", "pane": "w0:p0", "project": "p", "title": "古い", "text": "x",
+                         "started": time.time() - 5 * 86400, "updated": time.time() - 4 * 86400, "status": "done", "note": ""}
+
+    async def add_then_read():
+        tid = s.task_new({"pane": "w0:p1", "project": "p", "title": "新しい", "text": "y"}, "send")
+        return tid
+
+    fresh = c.portal.call(add_then_read)
+    rows_now = [r["id"] for r in c.get("/api/hub/tasks").json()]
+    check("片づけと同じ時に足した件は消えない（古い件だけ外れる）", (fresh in rows_now, "stale2" in rows_now), (True, False))
 
     # ---- コンテナ（Hermes の hubctl）からは、鍵があれば読める
     dock = {"Host": "host.docker.internal:8790"}

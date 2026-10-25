@@ -312,6 +312,45 @@ async def slow_hub():
 t0 = asyncio.run(slow_hub())
 check("ハブの報告が遅いときは、待ちきらずに通知する（1回だけ）", (bodies(), round(sent[0]["at"] - t0, 1) < 0.9 if sent else None),
       (["完了しました（ハブの報告は、このあと届きます）"], True))
+
+
+class Screen:  # 見えている画面の代わり（hello を受けた時刻と、見えているか）
+    def __init__(self):
+        self.visible, self.voice, self.speaker, self.seen = True, True, None, time.time()
+
+    async def send(self, **m):
+        pass
+
+
+async def hide_later(screen, after):
+    await asyncio.sleep(after)
+    screen.visible = False
+
+
+async def visible_then_hidden(hide_at):
+    """30秒の時点（ここでは0.2秒）では画面が見えていて、hide_at 秒で隠れ、ハブの報告は1.0秒でできる。"""
+    sent.clear()
+    screen = Screen()
+    s.CLIENTS.add(screen)
+    s.list_agents = lambda: [HUB]
+
+    async def slow_ask(agent, text):
+        await asyncio.sleep(1.0)
+        return "done", "片づきました"
+
+    s.ask = slow_ask
+    hider = asyncio.create_task(hide_later(screen, hide_at)) if hide_at is not None else None
+    await s.report(dict(D), "done")
+    await asyncio.gather(*list(s._tasks), return_exceptions=True)
+    if hider:
+        hider.cancel()
+    s.CLIENTS.discard(screen)
+
+
+asyncio.run(visible_then_hidden(0.4))
+check("30秒の時点で見えていても、ハブの報告の前に隠れたら、報告ができた時点で送る（1回）", bodies(), ["完了しました"])
+asyncio.run(visible_then_hidden(None))
+check("ずっと見えていれば送らない（その画面に声と文字で届く）", bodies(), [])
 s.REPORT_PUSH_WAIT = 30
 
 # 報告済みの件は、その後の続きの作業で止まっても・見失っても、台帳では完了のまま
