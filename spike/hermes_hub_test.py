@@ -134,6 +134,9 @@ begin("見て")
 screen()
 begin("だめ")
 check("断るは esc", answer(answer="no"), ("ok", ["esc"]))
+state.update(screen=PERMISSION)
+begin("ほかの話")  # 新しい問いを、ハブはまだ見ていない
+check("断る（いいえ）は、問いを見る前でも送れる（決めた範囲。「はい」は見たあとの発言のあとだけ）", (answer(answer="no"), answer()), (("ok", ["esc"]), ("unseen", [])))
 
 # ---- 閉じる（聞いた発言の、すぐ次の発言のはっきりした許可でだけ）
 state.update(status="idle")
