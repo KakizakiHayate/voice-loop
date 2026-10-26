@@ -206,7 +206,7 @@ function applyTarget() {
 }
 async function loadAgents() {
   let list; try { list = await (await fetch('/api/agents')).json(); } catch { return; }
-  const sig = JSON.stringify(list.map(a => [a.pane, a.key, a.title, a.status]));
+  const sig = JSON.stringify(list.map(a => [a.pane, a.key, a.title, a.status, a.hermes ? a.session : '']));  // Hermes は会話の名前が変わる（💡 に出す）
   if (sig === agentsSig) return;
   agents = list; agentsSig = sig;
   const saved = localStorage.getItem(WANT);
@@ -568,6 +568,28 @@ function hskCard(it) {
   acts.appendChild(no); c.appendChild(acts);
   return c;
 }
+// ハブ（Hermes）の会話を新しくする: 前の会話を持ち越さずに始め直す（設定した時刻にも毎朝新しくなる。既定 4 時）。記憶と手順書は残り、直した記憶はここから効く。2段
+function hubSessionRow(a) {
+  const row = node('div', 'sitHead');
+  const when = a.reset_hour == null ? '日ごとには変わりません' : `毎朝${a.reset_hour}時に新しくなります`;
+  row.appendChild(node('span', null, `ハブの会話: ${a.session}（${when}）`));
+  const b = node('button', null, 'ハブの会話を新しくする');
+  let timer = null;
+  const reset = () => { clearTimeout(timer); sitHold = false; b.className = ''; b.textContent = 'ハブの会話を新しくする'; };
+  b.onclick = async () => {
+    if (!b.classList.contains('sure')) {  // 1段目: 確かめを出す。10 秒で戻る
+      sitHold = true; b.className = 'sure'; b.textContent = '前の会話を持ち越さずに始める';
+      timer = setTimeout(reset, 10000); return;
+    }
+    clearTimeout(timer); b.disabled = true; b.textContent = '新しくしています…';
+    let r; try { r = await postJSON('/api/hermes/session/new', {}); } catch { r = { ok: false, reason: '本体に届きません' }; }
+    sitNote = r.ok ? [`ハブの会話を新しくしました（${r.session}）。Hermes の記憶と手順書は残ります`, false]
+      : ['新しくできませんでした: ' + ({ off: 'Hermes がつながっていません', state: '状態を書けません' }[r.reason] || r.reason), true];
+    sys(sitNote[0]); sitHold = false; await loadAgents(); loadSituation();  // 一覧の会話の名前を取り直してから描く
+  };
+  row.appendChild(b);
+  return row;
+}
 function proposalCard(p) {
   const c = node('div', 'prop');
   const left = Math.max(1, Math.ceil((p.expires * 1000 - Date.now()) / 3600000));
@@ -622,6 +644,8 @@ async function loadSituation() {
     head.appendChild(b);
   }
   box.appendChild(head);
+  const hermesHub = agents.find(a => a.hermes && a.hub);
+  if (hermesHub) box.appendChild(hubSessionRow(hermesHub));
   if (sitNote) { const n = node('div', sitNote[1] ? 'bad' : null, sitNote[0]); n.id = 'sitNote'; box.appendChild(n); }
   if (h && h.on && (h.items.length || h.unreadable || h.problem)) {
     box.appendChild(node('h4', null, `ハブが手順に書き足したいこと（Hermes・${h.items.length}）— 採ると Hermes の手順に入り、次からの会話で使われます`));

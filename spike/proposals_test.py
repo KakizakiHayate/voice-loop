@@ -339,9 +339,10 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     reset()
     s.HERMES_DIR.mkdir(parents=True, exist_ok=True)
     (s.HERMES_DIR / "hub.md").write_text("ハブへの指示（試験）")
-    sysmsg = s.hermes_messages("こんにちは")[0]["content"]
-    check("Hermes への案内: 提案の数と「送るのはユーザーが 💡 から」が入り、文は入らない",
-          ("開いている提案" in sysmsg and "1 件" in sysmsg, "画面の 💡 から送ります" in sysmsg, "Excel" in sysmsg), (True, True, False))
+    msgs = s.hermes_messages("こんにちは")
+    sysmsg, usermsg = msgs[0]["content"], msgs[-1]["content"]
+    check("Hermes への案内: 提案の数は発言の後ろの案内に、「送るのはユーザーが 💡 から」は指示に入り、提案の文はどちらにも入らない",
+          ("開いている提案 1 件" in usermsg, "画面の 💡 から送ります" in sysmsg, "Excel" in sysmsg + usermsg), (True, True, False))
 
 # ---------- 拾う役の回と通知 ----------
 captured: dict = {}

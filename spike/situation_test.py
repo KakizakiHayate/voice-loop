@@ -299,10 +299,12 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     s.write_json(s.SITUATION_FILE, sit)
     s.HERMES_DIR.mkdir(parents=True, exist_ok=True)
     (s.HERMES_DIR / "hub.md").write_text("ハブへの指示（試験）")
-    sysmsg = s.hermes_messages("こんにちは")[0]["content"]
-    check("Hermes への案内: 件数と使い方は入り、話題の本文は入らない",
-          ("ハブへの指示（試験）" in sysmsg, "話題が 1 件" in sysmsg, "覚えていることが 3 件" in sysmsg, "hubctl remember" in sysmsg, "INJECT" in sysmsg),
-          (True, True, True, True, False))
+    msgs = s.hermes_messages("こんにちは")
+    sysmsg, usermsg = msgs[0]["content"], msgs[-1]["content"]
+    check("Hermes への案内: 使い方は指示に、件数は発言の後ろの案内に入り、話題の本文はどちらにも入らない",
+          ("ハブへの指示（試験）" in sysmsg, "話題 1 件" in usermsg, "覚えていること 3 件" in usermsg, "hubctl remember" in sysmsg,
+           "INJECT" in sysmsg + usermsg, usermsg.startswith("こんにちは")),
+          (True, True, True, True, False, True))
     text = c.get("/api/hub/context").json()["text"]
     check("context: 覚えていること・話題・最近外れた話題", ("[1] 週次定例は情報交換の場" in text, "■ ブログの記事（フォルダ: blog）" in text, "次: 金曜までに初稿" in text), (True, True, True))
     narrowed = c.get("/api/hub/context", params={"q": "cis"}).json()["text"]

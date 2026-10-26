@@ -80,13 +80,19 @@ def one_line(text):
     return " ".join(text.split()) or "（なし）"
 
 
+# 直近の依頼がどこから来たか。other は、ハブも画面の 💡 も通さずに頼まれたもの（ユーザーが端末や 1対1 で直接頼んだなど）
+ASKED_BY = {"voice-loop": "（ハブか 💡 から）", "other": "（ハブを通さずに頼まれたもの。中身は read で確かめる）"}
+
+
 def cmd_sessions(_):
     rows = call("sessions")
     print(f"開いているセッション {len(rows)} 件（ハブ自身を除く）\n{QUOTE_NOTE}\n")
     for r in rows:
         print(f"[{r['pane']}] {r['project']}｜{r['title']}")
-        print(f"  状態: {STATUS.get(r['status'], r['status'])}（最後の動き {ago(r['idle_minutes'])}）")
-        print(f"  直近の依頼: {one_line(r['last_user'])}")
+        when = f"・{r['updated_at']}" if r.get("updated_at") else ""
+        print(f"  状態: {STATUS.get(r['status'], r['status'])}（最後の動き {ago(r['idle_minutes'])}{when}）")
+        by = ASKED_BY.get(r.get("asked_by"), "")
+        print(f"  直近の依頼{by}: {one_line(r['last_user'])}")
         print(f"  直近の返答: {one_line(r['last_reply'])}\n")
 
 
