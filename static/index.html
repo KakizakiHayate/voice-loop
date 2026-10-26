@@ -811,7 +811,7 @@ $('agent').addEventListener('change', renderSessions);
 // 直している途中の文・消すの確かめ・足す欄の打ちかけは、描き直しても残るよう、画面の状態として持つ（描くたびにそこから作り直す）。
 // 描き直しを止めるのは、文の欄を打っている間（フォーカスがある間）と、書き込みの最中と、「ハブの会話を新しくする」の確かめの間だけ
 let memTimer = null, memGen = 0, memNote = null, memBusy = false, memHubHold = false, memLast = null;
-const memEdits = new Map();    // 版 → 直している途中の文
+const memEdits = new Map();    // 版 → {target, text}（直している途中の文。項目が見えなくなっても、利用者が足すか捨てるまで消さない）
 const memConfirm = new Map();  // 版 → 消すの確かめの期限（ミリ秒）
 const memDraft = { target: 'user', text: '' };  // 足す欄の打ちかけ
 const MEM_T = { user: 'ユーザーについて（USER.md）', memory: 'メモ（MEMORY.md）' };
@@ -847,17 +847,20 @@ function drawMemory() {
   if (d.problem) box.appendChild(node('div', 'sitMeta bad', '上限を読めません: ' + d.problem));
   const shown = new Set();
   for (const t of ['user', 'memory']) {
+    for (const e of d.targets[t].entries) shown.add(e.v);
+  }
+  for (const t of ['user', 'memory']) {
     const tt = d.targets[t], sec = node('div', 'memT'), h = node('h4', null, MEM_T[t]);
     h.appendChild(node('span', 'use', tt.limit ? `${tt.chars} / ${tt.limit} 字` : `${tt.chars} 字`));
     sec.appendChild(h);
     if (tt.status === 'unreadable') sec.appendChild(node('div', 'sitMeta bad', 'このファイルは読めません（symlink・大きすぎる・壊れた文字など）。画面では変えません'));
     if (tt.enabled === false) sec.appendChild(node('div', 'sitMeta', 'この記憶は Hermes の設定で切ってあります'));
-    for (const e of tt.entries) { shown.add(e.v); sec.appendChild(memCard(t, e, tt.status === 'ok')); }
+    for (const e of tt.entries) sec.appendChild(memCard(t, e, tt.status === 'ok'));
+    for (const [v, ed] of memEdits) if (ed.target === t && !shown.has(v)) sec.appendChild(memOrphan(t, v, ed));  // 直す途中で、いま見当たらない項目
     if (!tt.entries.length && tt.status !== 'unreadable') sec.appendChild(node('div', 'sitMeta', '（まだありません）'));
     box.appendChild(sec);
   }
-  for (const v of [...memEdits.keys()]) if (!shown.has(v)) memEdits.delete(v);  // もう無い項目を直す途中は捨てる（Hermes が書き換えた・消した）
-  for (const v of [...memConfirm.keys()]) if (!shown.has(v)) memConfirm.delete(v);
+  for (const v of [...memConfirm.keys()]) if (!shown.has(v)) memConfirm.delete(v);  // 消すの確かめは、項目が見えなくなったら外す（安全側）
   box.appendChild(memAddForm());
 }
 async function memWrite(op, body, okText, onOk = () => {}) {
@@ -876,19 +879,19 @@ function memCard(t, e, editable) {
   if (!editable) { c.appendChild(node('div', 'text', e.text)); return c; }
   c.dataset.v = e.v;
   if (memEdits.has(e.v)) {  // 直している途中（描き直しても、開いたときの版と打った文のまま）
-    const ta = node('textarea'); ta.value = memEdits.get(e.v); ta.oninput = () => memEdits.set(e.v, ta.value);
+    const ed = memEdits.get(e.v), ta = node('textarea'); ta.value = ed.text; ta.oninput = () => { ed.text = ta.value; };
     const row = node('div', 'acts'), save = node('button', null, '保存'), cancel = node('button', null, 'やめる');
     cancel.onclick = () => { memEdits.delete(e.v); drawMemory(); };
     save.onclick = async () => {
       save.disabled = cancel.disabled = true; save.textContent = '保存しています…';
-      await memWrite('edit', { target: t, v: e.v, content: memEdits.get(e.v) }, '直しました', () => memEdits.delete(e.v));
+      await memWrite('edit', { target: t, v: e.v, content: ed.text }, '直しました', () => memEdits.delete(e.v));
     };
     row.append(save, cancel); c.append(ta, row);
     return c;
   }
   c.appendChild(node('div', 'text', e.text));
   const acts = node('div', 'acts'), ed = node('button', null, '直す'), rm = node('button', null, '消す');
-  ed.onclick = () => { memEdits.set(e.v, e.text); drawMemory(); const ta = $('memPanel').querySelector(`.mem[data-v="${e.v}"] textarea`); if (ta) ta.focus(); };
+  ed.onclick = () => { memEdits.set(e.v, { target: t, text: e.text }); drawMemory(); const ta = $('memPanel').querySelector(`.mem[data-v="${e.v}"] textarea`); if (ta) ta.focus(); };
   if ((memConfirm.get(e.v) || 0) > Date.now()) { rm.className = 'sure'; rm.textContent = 'この項目を消す'; }
   rm.onclick = async () => {
     if ((memConfirm.get(e.v) || 0) <= Date.now()) {  // 1段目: 確かめを出す。10 秒で戻る
@@ -899,6 +902,16 @@ function memCard(t, e, editable) {
     await memWrite('remove', { target: t, v: e.v }, '消しました');
   };
   acts.append(ed, rm); c.appendChild(acts);
+  return c;
+}
+function memOrphan(t, v, ed) {  // 直す途中のまま、項目が見当たらなくなった（Hermes が書き換えた・消した、またはファイルを読めない）。文は残し、足すか捨てるかを選んでもらう
+  const c = node('div', 'mem'); c.dataset.v = v;
+  c.appendChild(node('div', 'sitMeta bad', '直している途中の項目が、いまの記憶に見当たりません（Hermes が書き換えた・消した、またはファイルを読めない）。文はここに残してあります。新しい項目として足すか、捨ててください'));
+  const ta = node('textarea'); ta.value = ed.text; ta.oninput = () => { ed.text = ta.value; };
+  const row = node('div', 'acts'), add = node('button', null, '新しい項目として足す'), drop = node('button', null, '捨てる');
+  add.onclick = async () => { add.disabled = drop.disabled = true; await memWrite('add', { target: t, content: ed.text }, '足しました', () => memEdits.delete(v)); };
+  drop.onclick = () => { memEdits.delete(v); drawMemory(); };
+  row.append(add, drop); c.append(ta, row);
   return c;
 }
 function memAddForm() {

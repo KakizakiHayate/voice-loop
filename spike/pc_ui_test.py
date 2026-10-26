@@ -244,6 +244,33 @@ def run_wide(page, who):
     page.evaluate("memConfirm.clear(); loadMemory()")
     time.sleep(0.4)
 
+    # 直す途中に、ファイルが一時読めなくなっても（Codex の再現）、文は残り、読めるように戻れば元の直す途中に戻る
+    card(0).locator("button", has_text="直す").click()
+    card(0).locator("textarea").fill("保存前の編集内容")
+    raw = (MEM / "USER.md").read_bytes()
+    (MEM / "USER.md").write_bytes(b"\xff\xfe broken")
+    page.click("#tabSit")
+    page.click("#tabMem")
+    orphan = page.locator("#memPanel .mem", has_text="見当たりません")
+    check(f"{who} 直す途中の項目が読めなくなっても、文は「見当たりません」のカードに残る（捨てない）",
+          (wait(lambda: "このファイルは読めません" in mem_text(page) and orphan.count() == 1), orphan.locator("textarea").input_value() if orphan.count() else None),
+          (True, "保存前の編集内容"))
+    (MEM / "USER.md").write_bytes(raw)
+    page.evaluate("loadMemory()")
+    check(f"{who} 読めるように戻れば、元の項目の直す途中に戻る", (wait(lambda: card(0).locator("textarea").count() == 1), card(0).locator("textarea").input_value(), orphan.count()),
+          (True, "保存前の編集内容", 0))
+    card(0).locator("button", has_text="やめる").click()
+    (MEM / "MEMORY.md").write_text("週次定例は情報交換の場")
+    page.locator("#memPanel .memT").nth(1).locator(".mem").nth(0).locator("button", has_text="直す").click()
+    page.locator("#memPanel .memT").nth(1).locator(".mem textarea").fill("Hermes に先に書き換えられる")
+    (MEM / "MEMORY.md").write_text("週次定例は情報交換の場（Hermes が直した）")
+    page.evaluate("document.activeElement.blur(); loadMemory()")
+    check(f"{who} 直す途中の項目を Hermes が書き換えたら、文は残して「新しい項目として足す」「捨てる」を出す",
+          (wait(lambda: orphan.count() == 1), orphan.locator("textarea").input_value() if orphan.count() else None, [b.text_content() for b in orphan.locator("button").all()]),
+          (True, "Hermes に先に書き換えられる", ["新しい項目として足す", "捨てる"]))
+    orphan.locator("button", has_text="捨てる").click()
+    check(f"{who} 捨てると、カードが消え、記憶は Hermes の直したまま", (wait(lambda: orphan.count() == 0), entries("memory")), (True, ["週次定例は情報交換の場（Hermes が直した）"]))
+
     # 消す（2 段）
     card(1).locator("button", has_text="消す").click()
     check(f"{who} 消すの 1 回目は確かめを出すだけ（消さない）", (card(1).locator("button.sure").text_content(), XSS in entries("user")), ("この項目を消す", True))
