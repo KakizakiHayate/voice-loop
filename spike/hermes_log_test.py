@@ -202,7 +202,8 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     before = [list(r) for r in s.HERMES_TURNS]
     s.HERMES_TURNS.clear()
     s._load_hermes_turns()
-    check("台帳が記録から戻る（発言・返事とも）", [list(r) for r in s.HERMES_TURNS], before)
+    check("台帳が記録から戻る（発言・返事とも）", [list(r)[:3] for r in s.HERMES_TURNS], [r[:3] for r in before])
+    check("記録から戻した行には、直前に聞いた返答の写しを作らない（承認に答えるときは聞き直してもらう）", {r[3] for r in s.HERMES_TURNS}, {None})
     check("戻した台帳で、前の発言への返事が読める", s.hub_reply_to(before[1][0]), "brew の件を送りました")
     new = s.hermes_turn_begin("再起動のあと")
     check("新しい発言の ID は前のどれとも違う", new in {r[0] for r in before}, False)
@@ -294,10 +295,10 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
 
     # ---- 本当に起動し直す（別のプロセスで本体を読み込む）: 台帳が記録から戻り、新しい発言の ID は前と重ならない
     probe = subprocess.run([sys.executable, "-c", "import json, server as s; n = len(s.HERMES_TURNS); t = s.hermes_turn_begin('起動し直したあと');"
-                            " print(json.dumps({'turns': [list(r) for r in s.HERMES_TURNS][:n], 'new': t}))"],
+                            " print(json.dumps({'turns': [list(r)[:3] for r in s.HERMES_TURNS][:n], 'new': t}))"],
                            cwd=ROOT, capture_output=True, text=True, timeout=120)
     after = json.loads(probe.stdout.strip().splitlines()[-1]) if probe.returncode == 0 else {"turns": None, "new": None}
-    check("起動し直すと、台帳が記録から戻る（記録に書けなかった発言は戻らない）", after["turns"], [list(r) for r in s.HERMES_TURNS if not r[1].startswith(("書けないとき", "発言だけ書けない"))])
+    check("起動し直すと、台帳が記録から戻る（記録に書けなかった発言は戻らない）", after["turns"], [list(r)[:3] for r in s.HERMES_TURNS if not r[1].startswith(("書けないとき", "発言だけ書けない"))])
     check("起動し直したあとの発言の ID は、前のどれとも違う", after["new"] in {r[0] for r in s.HERMES_TURNS}, False)
 
     # ---- 記録を読めなくても、本体は起動する（守りの台帳は空から。履歴は「読めなかった」と出す）

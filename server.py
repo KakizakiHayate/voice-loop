@@ -44,6 +44,7 @@ sys.path.insert(0, str(HERE / "scripts"))
 from origin_guard import SameOriginOnly  # noqa: E402  接続元の確かめ
 import intake  # noqa: E402  拾う役（いまの状況を作る claude -p）
 import hermes_skills  # noqa: E402  Hermes の手順の書き足しを画面で採る・捨てる、Hermes の記憶を読む
+import consent  # noqa: E402  利用者の発言が、許す・選ぶの答えになっているか（承認に答える・閉じるの守り）
 
 PLUGIN_ID = "u-space.voice-loop"  # herdr-plugin.toml の id と同じ
 # 端末ごとの設定と状態は、本体のフォルダ（herdr が入れ直すと置き換わる）の外に置く。場所は herdr がプラグインに用意するフォルダ
@@ -707,19 +708,23 @@ def hermes_history(limit: int = 40) -> list[dict]:
 # 承認に答える・閉じるの守り（「見たあとにユーザーが発言したか」「聞いたときの返答に問いがあるか」）はこの台帳で確かめる。自動通知は載せない。
 # 中身は上の記録にも書き、起動のときに記録から戻す（再起動で消えない。発言の ID は再起動をまたいでも重ならない）。
 # 記録を読めなければ空から始める（守りは「まだ発言が無い」として、新しい発言を待つ側に倒れる）
-HERMES_TURNS: deque = deque(maxlen=50)  # (発言の ID, ユーザーの文, Hermes の返答)
+HERMES_TURNS: deque = deque(maxlen=50)  # (発言の ID, ユーザーの文, Hermes の返答, 発言の直前に聞いた Hermes の返答)
+# ハブ（Hermes）の最後の出力（発言への返答か、自動通知への報告）。利用者の発言が始まるときに台帳の行へ写す（承認に答えるの守りの heard）。
+# 記録（hermes-log.jsonl）からは取らない（書けなかった報告で、古い問いを拾わないため）。Hermes とのやり取りの鍵（pane_lock）の中で置き換え・写す
+HERMES_HEARD = {"text": ""}
 _unsaved: set[str] = set()  # 記録に書けなかった発言の ID（画面に「記録に残っていない」と知らせるため）
 
 
 def hermes_turn_begin(text: str) -> str:
     turn = f"h{os.urandom(6).hex()}"
-    HERMES_TURNS.append([turn, text, ""])
+    HERMES_TURNS.append([turn, text, "", HERMES_HEARD["text"]])
     if not hermes_log("me", text, turn=turn):
         _unsaved.add(turn)
     return turn
 
 
 def hermes_turn_end(turn: str, reply: str):
+    HERMES_HEARD["text"] = reply
     for row in HERMES_TURNS:
         if row[0] == turn:
             row[2] = reply
@@ -738,7 +743,7 @@ def _load_hermes_turns():
         if not isinstance(turn, str):
             continue
         if d["role"] == "me":
-            rows[turn] = [turn, d["text"], ""]
+            rows[turn] = [turn, d["text"], "", None]  # 直前に聞いた返答の写しは記録から作らない（承認に答えるときは聞き直してもらう）
         elif d["role"] == "ai" and turn in rows:
             rows[turn][2] = d["text"]
     HERMES_TURNS.extend(rows.values())
@@ -759,6 +764,7 @@ async def hermes_exchange(text: str) -> tuple[str, str, bool]:
             if not isinstance(e, RuntimeError):
                 traceback.print_exc()
             reply = ""
+            HERMES_HEARD["text"] = ""  # 利用者が聞くのは本体の失敗の知らせ（ハブの問いではない）
         else:
             hermes_turn_end(turn, reply)
             why = "" if reply else "Hermes の返事が空でした"
@@ -772,8 +778,33 @@ async def hermes_exchange(text: str) -> tuple[str, str, bool]:
 def hub_turns(n: int = 1) -> list[tuple[str, str]]:
     """ユーザー本人の発言の (ID, 文) を新しいものから n 件。ハブが Claude Code なら記録から、Hermes なら台帳から。"""
     if HERMES_HUB:
-        return [(t, u) for t, u, _ in list(HERMES_TURNS)[::-1][:n]]
+        return [(row[0], row[1]) for row in list(HERMES_TURNS)[::-1][:n]]
     return human_turns(hub_log(), n)
+
+
+def heard_before(path: Path | None, turn: str) -> str:
+    """Claude Code のハブの記録で、発言 turn の行より前の、ハブの最後の返答（発言か自動通知への返答。最後のツール呼び出しより後の文をまとめたもの）。
+    turn の行より後（いまの発言の中でハブが書く文）は使わない。見つからなければ空。"""
+    if not (path and path.exists()):
+        return ""
+    lines = read_lines(path, tail_bytes=600_000)
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            uid = json.loads(lines[i]).get("uuid")
+        except json.JSONDecodeError:
+            continue
+        if uid == turn:
+            return last_exchange(lines[:i])[1]
+    return ""
+
+
+def hub_heard(turn: str | None) -> str:
+    """利用者が発言 turn の直前に聞いたハブの返答（本体が受け取った原文）。分からなければ空（守りは断る側に倒れる）。"""
+    if not turn:
+        return ""
+    if HERMES_HUB:
+        return next((row[3] or "" for row in HERMES_TURNS if row[0] == turn), "")
+    return heard_before(hub_log(), turn)
 
 
 def hub_reply_to(turn: str | None) -> str:
@@ -781,7 +812,7 @@ def hub_reply_to(turn: str | None) -> str:
     if not turn:
         return ""
     if HERMES_HUB:
-        return next((r for t, _, r in HERMES_TURNS if t == turn), "")
+        return next((row[2] for row in HERMES_TURNS if row[0] == turn), "")
     return reply_to(hub_log(), turn)
 
 
@@ -1664,6 +1695,8 @@ async def _report(d: dict, kind: str, notify=lambda outcome: None) -> str:
             REPORTING = False
         hlog(f"報告 {kind}: {label} → {state}（画面 {len(CLIENTS)}）", flush=True)
         if hub.get("hermes"):
+            # 利用者が次に聞くのはこの報告（受け取れなければ本体の失敗の知らせ）。記録に書けたかに関係なく、ここで置き換える
+            HERMES_HEARD["text"] = reply if state == "done" and reply.strip() else ""
             if state == "done" and reply.strip():
                 saved = hermes_log("ai", reply, report=True, about=label) and saved
             else:
@@ -1756,7 +1789,9 @@ def hub_human_turn() -> str | None:
 async def hub_answer(body: dict):
     """止まっているセッションの問いに、ユーザーの答えを伝える。
     守ること: ハブが見てユーザーに伝えた問いにだけ答える（見たのと同じ画面で、かつ見たあとにユーザーが発言している）。
-    取り消しにくい操作の「はい」は、聞き返してユーザーがもう一度発言してから。「今後は聞かずに許可」は選ばない。"""
+    「はい」と番号は、ユーザーがその発言の直前に聞いたハブの返答が、プロジェクト名を挙げた問いで（not_asked）、
+    発言全体が、その答えの文法に収まるときだけ（not_said。scripts/consent.py）。断る（いいえ）はいつでも送れる。
+    取り消しにくい操作の「はい」は、聞き返してユーザーがもう一度発言してから（どちらの発言も上の確かめを通ること）。「今後は聞かずに許可」は選ばない。"""
     if REPORTING:
         return JSONResponse({"ok": False, "reason": "reporting"})
     pane, answer, confirmed = str(body.get("pane", "")), str(body.get("answer", "")).strip().lower(), bool(body.get("confirmed"))
@@ -1771,7 +1806,8 @@ async def hub_answer(body: dict):
     if trust:  # フォルダを信頼するかは、利用者が端末で答える
         return JSONResponse({"ok": False, "reason": "trust"})
     text = await asyncio.to_thread(read_prompt, pane)
-    fp, prompt, turn = prompt_fp(text), parse_prompt(text), await asyncio.to_thread(hub_human_turn)
+    (turn, utter), = (await asyncio.to_thread(hub_turns, 1) or [(None, "")])[:1]
+    fp, prompt, project = prompt_fp(text), parse_prompt(text), a["cwd"].rsplit("/", 1)[-1]
     if answer in ("no", "n"):
         key, said = "esc", "いいえ（取り消し）"
     else:
@@ -1781,24 +1817,28 @@ async def hub_answer(body: dict):
             return JSONResponse({"ok": False, "reason": "unseen", "screen": text})
         if seen[1] == turn:  # 見たのと同じ発言の中で答えようとしている = ユーザーはまだ中身を聞いていない
             return JSONResponse({"ok": False, "reason": "same_turn", "screen": text})
+        if answer not in ("yes", "y") and not answer.isdigit():
+            return JSONResponse({"ok": False, "reason": "bad_answer"})
+        if answer in ("yes", "y") and prompt["kind"] != "permission":
+            return JSONResponse({"ok": False, "reason": "not_permission", "options": prompt["options"]})
+        if answer.isdigit() and (prompt["kind"] != "question" or int(answer) not in prompt["options"]):
+            return JSONResponse({"ok": False, "reason": "bad_choice", "kind": prompt["kind"], "options": prompt["options"]})
+        heard = await asyncio.to_thread(hub_heard, turn)
+        if not consent.asks(heard, project):  # ユーザーは、この相手の問いだと分かる文を聞いていない
+            return JSONResponse({"ok": False, "reason": "not_asked", "project": project, "screen": text})
+        if not (consent.affirms(utter, "answer", project) if answer in ("yes", "y") else consent.chooses(utter, int(answer), prompt["options"], project)):
+            return JSONResponse({"ok": False, "reason": "not_said", "said": _clip(utter, 80), "project": project})
         if answer in ("yes", "y"):
-            if prompt["kind"] != "permission":
-                return JSONResponse({"ok": False, "reason": "not_permission", "options": prompt["options"]})
             if RISKY.search(asked_part(text)):
                 held = CONFIRMING.get(pane)
                 if not (confirmed and held and held[0] == fp and held[1] != turn):
                     CONFIRMING[pane] = (fp, turn) if not (held and held[0] == fp) else held
                     return JSONResponse({"ok": False, "reason": "confirm", "screen": text})
             key, said = "1", "はい（今回だけ許可）"
-        elif answer.isdigit():
-            n = int(answer)
-            if prompt["kind"] != "question" or n not in prompt["options"]:
-                return JSONResponse({"ok": False, "reason": "bad_choice", "kind": prompt["kind"], "options": prompt["options"]})
-            key, said = str(n), f"{n}番「{prompt['options'][n]}」"
         else:
-            return JSONResponse({"ok": False, "reason": "bad_answer"})
+            n = int(answer)
+            key, said = str(n), f"{n}番「{prompt['options'][n]}」"
     r = await asyncio.to_thread(herdr, "agent", "send-keys", pane, key)
-    project = a["cwd"].rsplit("/", 1)[-1]
     hlog(f"answer → {pane} ({project}): {said} {'ok' if 'result' in r else 'ERR'}", flush=True)
     if "result" not in r:
         return JSONResponse({"ok": False, "reason": "herdr が応答しません"})
@@ -1974,8 +2014,6 @@ async def hub_spawn(body: dict):
 CLOSING: dict[str, tuple[tuple, str | None]] = {}  # 閉じていいかを聞いている: pane → (どのセッションか, 聞いたときのユーザーの最後の発言)
 CLOSED: set[str] = set()  # ハブが閉じた pane。見張りに「見つからなくなった」と知らせさせない
 # 許可の答えの読み取り。断りの語が1つでもあれば閉じない。はっきり許す語が無いときも閉じない（どちらも聞き直し）
-CLOSE_NO = re.compile(r"いいえ|ううん|いや|だめ|ダメ|駄目|やめ|止め|待って|まって|ないで|残して|まだ|後で|あとで|また今度|今度[にでね]|(?<![a-z])(no|not|don't|stop|wait|later)(?![a-z])", re.I)
-CLOSE_YES = re.compile(r"はい|うん|ええ(?!っ?と)|いい|お願い|おねがい|閉じて|閉じちゃ|とじて|オーケー|オッケー|大丈夫|どうぞ|構わない|かまわない|頼む|よろしく|(?<![a-z])(yes|ok|okay|sure)(?![a-z])", re.I)
 # 閉じていいかの問い（「閉じていいですか」「閉じてもいい？」「閉じていいか、聞かせてください」「閉じますか」）。
 # 「閉じませんでした」のような報告や、「閉じると何が起きるか説明しましょうか」を、問いと取り違えないため
 CLOSE_QUESTION = re.compile(r"閉じ(て(も)?(いい|よろしい)(です)?|ます|ましょう)(か|[?？])")
@@ -1993,7 +2031,7 @@ async def hub_close(body: dict):
       1回目は閉じずに、閉じる相手を返す（ハブはそれをユーザーに伝えて許可を聞く）。
       閉じるのは confirmed で、聞いたときのユーザーの発言の、すぐ次の発言の中だけ（同じ発言の中では閉じない。あいだに別の発言をはさんだら聞き直し）。
       さらに、聞いたときのハブの返答（ユーザーが聞いた文）が、プロジェクト名を挙げて閉じていいかを問うていて、
-      ユーザーの次の発言が、はっきり許す語を含み、断りの語を含まないこと。
+      ユーザーの次の発言全体が、許す文法に収まること（断る・保留・問い返し・禁止形は通さない。scripts/consent.py）。
       セッション ID の無い相手は、入れ替わっても見分けられないので閉じない。"""
     if REPORTING:
         return JSONResponse({"ok": False, "reason": "reporting"})
@@ -2014,7 +2052,7 @@ async def hub_close(body: dict):
         if now and held[1] and held[1] == before:
             if not asks_to_close(heard, project):
                 why = "not_asked"
-            elif CLOSE_NO.search(said) or not CLOSE_YES.search(said):
+            elif not consent.affirms(said, "close", project):
                 why = "not_yes"
             else:
                 del CLOSING[pane]  # 閉じる前に外す（重ねて届いた同じ許可で、二度閉じない）
