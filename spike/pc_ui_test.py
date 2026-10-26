@@ -220,6 +220,30 @@ def run_wide(page, who):
     card(0).locator("button", has_text="保存").click()
     check(f"{who} 直す: 項目が置き換わり、案内が出る", (wait(lambda: "直しました" in mem_text(page)), entries("user")[0]), (True, "利用者の名前は山田（やまだ）"))
 
+    # 直す途中に、ほかの欄を打ったりタブを往復したり、二つ目を直し始めたりしても、直す途中は消えない
+    card(0).locator("button", has_text="直す").click()
+    card(0).locator("textarea").fill("保存前の編集内容")
+    page.fill("#memPanel .memAdd textarea", "別の追加下書き")
+    page.click("#tabSit")
+    page.click("#tabMem")
+    check(f"{who} 直す途中に足す欄を打ってタブを往復しても、直す途中と足す欄の打ちかけは残る",
+          (wait(lambda: card(0).locator("textarea").count() == 1), card(0).locator("textarea").input_value(), page.input_value("#memPanel .memAdd textarea")),
+          (True, "保存前の編集内容", "別の追加下書き"))
+    card(2).locator("button", has_text="直す").click()
+    card(2).locator("textarea").fill("二つ目の編集")
+    card(1).locator("button", has_text="消す").click()
+    page.evaluate("document.activeElement.blur(); loadMemory()")
+    time.sleep(0.6)
+    check(f"{who} 二つを直す途中と、別の項目の消すの確かめが、取り直しのあとも残る",
+          (card(0).locator("textarea").input_value(), card(2).locator("textarea").input_value(), card(1).locator("button.sure").count()),
+          ("保存前の編集内容", "二つ目の編集", 1))
+    card(0).locator("button", has_text="やめる").click()
+    card(2).locator("button", has_text="やめる").click()
+    page.fill("#memPanel .memAdd textarea", "")
+    check(f"{who} やめると直す途中を閉じ、記憶は変わらない", (page.locator("#memPanel .mem textarea").count(), entries("user")[0]), (0, "利用者の名前は山田（やまだ）"))
+    page.evaluate("memConfirm.clear(); loadMemory()")
+    time.sleep(0.4)
+
     # 消す（2 段）
     card(1).locator("button", has_text="消す").click()
     check(f"{who} 消すの 1 回目は確かめを出すだけ（消さない）", (card(1).locator("button.sure").text_content(), XSS in entries("user")), ("この項目を消す", True))

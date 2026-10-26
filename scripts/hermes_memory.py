@@ -124,9 +124,13 @@ def config():
     if get_managed_system():
         return None, "管理された設定（managed）なので、画面からは書きません"
     try:
-        fd = os.open(os.path.join(home, "config.yaml"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        dfd = os.open(home, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            fd = os.open("config.yaml", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dfd)  # 置き場のフォルダを起点に、symlink をたどらずに開く
+        finally:
+            os.close(dfd)
     except FileNotFoundError:
-        cfg = {}
+        cfg = None  # ファイルが無いときだけ既定
     except OSError as e:
         return None, "設定を開けません（" + type(e).__name__ + "）"
     else:
@@ -149,14 +153,10 @@ def config():
             cfg = fast_safe_load(data.decode("utf-8-sig"))
         except Exception as e:
             return None, "設定を読めません（" + type(e).__name__ + "）"
-        if cfg is None:
-            cfg = {}
-        if not isinstance(cfg, dict):
+        if not isinstance(cfg, dict):  # 空のファイル・null・リストなど。書きかけや壊れた設定を「無い」と同じに扱わない
             return None, "設定の形が違います"
-    mem = cfg.get("memory", {})
-    if mem is None:
-        mem = {}
-    if not isinstance(mem, dict):
+    mem = (cfg or {}).get("memory", {}) if cfg is not None else {}
+    if not isinstance(mem, dict):  # memory: null も断る（欄が無いときだけ既定）
         return None, "設定の memory の形が違います"
     out = {}
     for k in ("memory_enabled", "user_profile_enabled"):

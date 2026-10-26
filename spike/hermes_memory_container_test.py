@@ -124,10 +124,15 @@ try:
     # 設定が読めない・形が違う・managed では書かない
     for name, config in [("壊れた YAML", "memory: [unclosed\n"), ("根が dict でない", "- a\n- b\n"), ("memory が dict でない", "memory: 3\n"),
                          ("上限が文字列", "memory:\n  user_char_limit: \"${LIMIT}\"\n"), ("有効が文字列", "memory:\n  user_profile_enabled: \"false\"\n"),
-                         ("上限が真偽値", "memory:\n  user_char_limit: true\n"), ("切ってある target と壊れた上限", "memory:\n  user_profile_enabled: false\n  user_char_limit: abc\n")]:
+                         ("上限が真偽値", "memory:\n  user_char_limit: true\n"), ("切ってある target と壊れた上限", "memory:\n  user_profile_enabled: false\n  user_char_limit: abc\n"),
+                         ("根が null", "null\n"), ("空のファイル", ""), ("memory が null", "memory: null\n"), ("上限が null", "memory:\n  user_char_limit:\n")]:
         fresh(config)
         r = add("user", "書かれてはいけない")
         check(f"設定が読めない・形が違えば書かない（{name}）", (res(r), cat("memories/USER.md")), ("refused", ""))
+    fresh("memory:\n  memory_char_limit: 2200\n")
+    sh(f"mv {H}/config.yaml {H}/real.yaml && ln -s {H}/real.yaml {H}/config.yaml")
+    r = add("user", "書かれてはいけない")
+    check("設定のファイルが symlink なら書かない（置き場のフォルダを起点に、たどらずに開く）", (res(r), cat("memories/USER.md")), ("refused", ""))
     fresh()
     put(".managed", "nixos")
     r = add("user", "書かれてはいけない")
