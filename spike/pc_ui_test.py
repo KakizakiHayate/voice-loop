@@ -9,6 +9,9 @@
 セッションの一覧で話し相手が替わる（文字で送ると選んだ相手に届く）・記憶の一覧（字数・上限・文字として出す）・足す・直す（取り直しても編集の途中が残る）・
 消す（2 段）・当たったか分からないときの赤い案内と次の書き込みを断ること・1099px と 1100px の境・横にはみ出さない・PC でも話す・停止・文字・声・🔇・↻ が出る・
 スマホの幅に戻すと今の形（💡 📋 の相互の開閉、覚えていることの追加と削除）に戻り、もう一度 PC にしても壊れない。
+PC の見た目（Chromium）: 頼んだ件を「動いている」「終わった」に分け、状態の色の帯・指示の文は 2 行で切って押すと全文（取り直しても開いたまま）・
+ハブの返事の行頭の【見出し】を太く・記憶の上限との棒・長い項目は 4 行で切って「続きを表示」・直す・消すはマウスを載せた項目と消すの確かめ中だけ出す・
+入力は文字の欄が上で、話す・停止は相手と声と同じ行に小さく。
 使い方: uv run spike/pc_ui_test.py"""
 import json
 import os
@@ -162,7 +165,7 @@ def run_wide(page, who):
     check(f"{who} 1400px で PC の形になる", page.evaluate("document.body.classList.contains('wide')"), True)
     page.wait_for_selector("#memPanel .mem")
     side, log, rec = box(page, "#side"), box(page, "#log"), box(page, "#rec")
-    check(f"{who} 3 列（左 300px・真ん中・右 440px が横に並ぶ）", (side[1], rec[1], side[0] < log[0] < rec[0]), (300, 440, True))
+    check(f"{who} 3 列（1400px で左 280px＝幅の 2 割・真ん中・右 364px＝2.6 割が横に並ぶ）", (side[1], rec[1], side[0] < log[0] < rec[0]), (280, 364, True))
     check(f"{who} 頼んだ件は左の列に入って常に出る・状況は右の列に入る",
           (page.evaluate("document.getElementById('tasks').parentElement.id"), visible(page, "#tasks"), page.evaluate("document.getElementById('situation').parentElement.id")),
           ("side", True, "rec"))
@@ -304,6 +307,73 @@ def run_wide(page, who):
                                                 page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")), (True, True))
 
 
+LONG = "長い記憶の項目です。" * 40
+
+
+def run_design(page, who):
+    """PC の見た目の作り（色の帯・切り方・開いたままにすること・直す・消すの出し方）"""
+    seed()
+    (MEM / "USER.md").write_text(s.hermes_memory.DELIM.join(["利用者の名前は山田", LONG]))
+    now = time.time()
+    s.TASKS.clear()
+    for i, (st, text, age) in enumerate([("blocked", "承認待ちの指示。" * 12, 5), ("watching", "短い指示", 10), ("done", "終わった指示。" * 12, 60), ("lost", "切れた指示", 90)]):
+        s.TASKS[f"d{i}"] = {"id": f"d{i}", "kind": "send", "pane": "w1:p1", "project": "blog", "title": "記事", "text": text,
+                            "started": now - age * 60, "updated": now - age * 60, "status": st, "note": ""}
+    s.hermes_log("ai", "【全体】本文の一行目\n【次】二行目\nふつうの行【途中】")
+    open_page(page, 1400)
+    page.wait_for_selector("#taskList .task")
+    groups = page.eval_on_selector_all("#taskList .tgh, #taskList .tgs", "els => els.map(e => e.textContent)")
+    lanes = page.eval_on_selector_all("#taskList .task", "els => els.map(e => [e.dataset.lane || '', e.classList.contains('ended')])")
+    check(f"{who} 頼んだ件は「動いている」「終わった」に分け、状態の色の帯を付ける", (groups, lanes),
+          (["頼んだ件4 件", "動いている　2", "終わった（3日で一覧から消えます）　2"], [["wait", False], ["run", False], ["done", True], ["bad", True]]))
+    first = page.locator("#taskList .task").nth(0)
+    h2 = lambda: first.locator(".what").evaluate("e => [e.getBoundingClientRect().height, parseFloat(getComputedStyle(e).lineHeight)]")
+    hh, lh = h2()
+    check(f"{who} 長い指示の文は 2 行で切る", hh <= lh * 2 + 1, True)
+    first.click()
+    check(f"{who} 押すと全文を出す（aria-expanded も替わる）", (h2()[0] > lh * 2 + 1, first.get_attribute("aria-expanded")), (True, "true"))
+    page.evaluate("loadTasks()")
+    page.wait_for_function("document.querySelector('#taskList .task').getAttribute('aria-expanded') === 'true'")
+    first = page.locator("#taskList .task").nth(0)
+    check(f"{who} 取り直しても開いたまま（全文のまま）", (first.get_attribute("aria-expanded"), "open" in first.get_attribute("class"), h2()[0] > lh * 2 + 1), ("true", True, True))
+    page.locator("#taskList .task").nth(0).focus()
+    page.keyboard.press("Enter")
+    check(f"{who} キーの Enter でも閉じられる", page.locator("#taskList .task").nth(0).get_attribute("aria-expanded"), "false")
+    check(f"{who} 短い指示は押して開くものにしない", page.locator("#taskList .task").nth(1).get_attribute("role"), None)
+
+    wait(lambda: page.locator("#log .msg.ai .lead").count() > 0)
+    leads = page.eval_on_selector_all("#log .msg.ai .lead", "els => els.map(e => [e.textContent, getComputedStyle(e).fontWeight])")
+    check(f"{who} 返事の行頭の【見出し】だけを太くする（行の途中のものはそのまま・文は変えない）",
+          (leads, "【全体】本文の一行目" in (page.text_content("#log .msg.ai") or "")), ([["【全体】", "700"], ["【次】", "700"]], True))
+
+    page.wait_for_selector("#memPanel .mem")
+    d = page.evaluate("fetch('/api/hermes/memory').then(r => r.json())")["targets"]["user"]
+    width = page.locator("#memPanel .memT").nth(0).locator(".meter i").evaluate("e => e.style.width")
+    check(f"{who} 上限との棒は、字数と上限の比のとおり", float(width.rstrip("%")), round(min(1, d["chars"] / d["limit"]) * 100, 1))
+    more = lambda: page.eval_on_selector_all("#memPanel .mem > .more", "els => els.map(e => !e.hidden)")
+    check(f"{who} 「続きを表示」は、4 行に収まらない項目にだけ出る", wait(lambda: more() == [False, True, False]), True)
+    page.locator("#memPanel .mem > .more").nth(1).click()
+    check(f"{who} 押すと全文になり、取り直しても開いたまま",
+          (wait(lambda: page.locator("#memPanel .mem > .more").nth(1).text_content() == "たたむ"), page.evaluate("loadMemory().then(() => document.querySelectorAll('#memPanel .text.clamp').length)")),
+          (True, 2))
+    page.mouse.move(700, 450)
+    acts = lambda i: page.locator("#memPanel .memT").nth(0).locator(".mem").nth(i).locator(".acts").evaluate("e => getComputedStyle(e).opacity")
+    check(f"{who} 直す・消すは、マウスを載せていない項目には出さない", acts(0), "0")
+    page.locator("#memPanel .memT").nth(0).locator(".mem").nth(0).hover()
+    check(f"{who} マウスを載せた項目には出す", acts(0), "1")
+    page.locator("#memPanel .memT").nth(0).locator(".mem").nth(0).locator("button", has_text="消す").click()
+    page.evaluate("document.activeElement && document.activeElement.blur()")  # フォーカスで出ているのではないことを見る
+    page.mouse.move(700, 450)
+    check(f"{who} 消すの確かめ中は、マウスを外しても出したまま", (acts(0), page.locator("#memPanel .mem button.sure").count()), ("1", 1))
+    page.locator("#memPanel .memT").nth(0).locator(".mem").nth(1).locator("button", has_text="直す").focus()
+    check(f"{who} キーで移った項目にも出す", acts(1), "1")
+
+    t, a, k, st = box(page, "#typed"), page.locator("#agent").bounding_box(), page.locator("#talk").bounding_box(), page.locator("#stop").bounding_box()
+    check(f"{who} 入力は文字の欄が上、話す・停止は相手と声と同じ行に小さく",
+          (page.locator("#typed").bounding_box()["y"] < a["y"], round(k["y"]) == round(a["y"]) == round(st["y"]), round(k["height"])), (True, True, 36))
+    s.TASKS.clear()
+
+
 def run_phone(page, who):
     seed()
     open_page(page, 390)
@@ -341,6 +411,7 @@ def run_phone(page, who):
 with sync_playwright() as pw:
     b = pw.chromium.launch()
     run_wide(b.new_page(), "Chromium:")
+    run_design(b.new_page(), "Chromium（見た目）:")
     run_phone(b.new_page(), "Chromium（スマホ）:")
     b.close()
     b = pw.webkit.launch()

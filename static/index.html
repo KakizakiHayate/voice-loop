@@ -117,45 +117,121 @@
   .fact button { flex:none; border:none; background:none; color:var(--mute); font-size:15px; padding:0 6px; }
   #factForm { display:flex; gap:6px; }
   #factText { flex:1; min-width:0; font-size:16px; padding:6px 10px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; }
-  /* PC（横幅 1100px 以上で body に wide）。3 列: 左にセッションの一覧と頼んだ件、真ん中に会話、右に記録（記憶・状況）。スマホの幅では何も変えない */
+  /* PC（横幅 1100px 以上で body に wide）。3 列: 左にセッションの一覧と頼んだ件、真ん中に会話、右に記録（記憶・状況）。スマホの幅では何も変えない。
+     左の縦の色の帯は状態を表す（セッション・頼んだ件・承認のカードで同じ色）: 黄＝あなた待ち、青＝動いている、緑＝終わった、赤＝切れた・失敗、灰＝それ以外。
+     箱で囲むのは押して決めるもの（承認・提案・足す欄）だけにして、一覧は線で区切る */
   #side, #rec { display:none; }
-  body.wide { display:grid; grid-template-columns:300px minmax(0,1fr) 440px; grid-template-rows:auto minmax(0,1fr) auto;
+  body.wide {
+    --w-bg:#121316; --w-col:#17181b; --w-hover:#1d1f23; --w-sel:#25282e; --w-rule:#272a2f; --w-field:#1b1d21; --w-line:#363a41;
+    --w-t1:#ececec; --w-t2:#b4b8bf; --w-t3:#80858d; --w-go:#2b5285;
+    --s-wait:#e3b341; --s-run:#6ea8fe; --s-done:#56b67f; --s-bad:#e5736b; --s-idle:#5a5f67;
+    background:var(--w-bg);
+    display:grid; grid-template-columns:clamp(260px, 20vw, 320px) minmax(0,1fr) clamp(340px, 26vw, 460px); grid-template-rows:auto minmax(0,1fr) auto;
     grid-template-areas:"side asks rec" "side log rec" "side bar rec"; }
-  body.wide #side { grid-area:side; display:flex; flex-direction:column; min-height:0; background:#141414; border-right:1px solid #262626; }
-  body.wide #rec { grid-area:rec; display:flex; flex-direction:column; min-height:0; background:#141414; border-left:1px solid #262626; }
-  body.wide #asks { grid-area:asks; padding-top:8px; }
-  body.wide #log { grid-area:log; min-height:0; padding:16px 24px 8px; }
-  body.wide #bar { grid-area:bar; padding:10px 24px 14px; }
-  body.wide #bar > * { order:2; } body.wide #status { order:0; } body.wide #typedForm { order:1; }  /* PC は文字で打つのが主なので、文字の欄を上に */
-  body.wide .msg { max-width:min(80%, 760px); }
-  body.wide #talk, body.wide #stop { height:48px; font-size:16px; }
-  body.wide #sitBtn, body.wide #tasksBtn, body.wide #tasksClose, body.wide #sitClose { display:none !important; }
-  body.wide #tasks { flex:1; min-height:0; max-height:none; padding-top:8px; border-bottom:none; background:none; }
-  body.wide #situation { flex:1; min-height:0; max-height:none; padding-top:8px; border-bottom:none; background:none; }
+  body.wide button { cursor:pointer; }
+  body.wide button:focus-visible, body.wide [role="button"]:focus-visible, body.wide select:focus-visible { outline:2px solid var(--s-run); outline-offset:1px; }
+  body.wide #side { grid-area:side; display:flex; flex-direction:column; min-height:0; background:var(--w-col); border-right:1px solid var(--w-rule); }
+  body.wide #rec { grid-area:rec; display:flex; flex-direction:column; min-height:0; background:var(--w-col); border-left:1px solid var(--w-rule); }
   body.wide #rec[data-tab="mem"] #situation, body.wide #rec[data-tab="sit"] #memPanel { display:none !important; }
-  body.wide .sitHead button.sure { background:#b8862e; color:#111; font-weight:600; }
-  .side-h { font-size:12px; color:var(--mute); padding:8px 12px 0; }
-  #sessions { flex:none; max-height:45%; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding:6px 10px 10px; border-bottom:1px solid #262626; }
-  .sess { display:flex; align-items:center; gap:6px; text-align:left; border:1px solid #2f2f2f; border-radius:8px; background:#1a1a1a; color:var(--fg); font-size:13px; padding:6px 8px; }
-  .sess.on { border-color:var(--ok); background:#16261d; }
-  .sess .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sess .st { flex:none; font-size:11px; color:var(--mute); }
-  .sess.blocked .st { color:#e6c36a; } .sess.working .st { color:#7fb4ff; }
-  #recTabs { display:flex; gap:4px; padding:8px 10px 0; border-bottom:1px solid #262626; }
-  #recTabs button { border:none; border-radius:8px 8px 0 0; background:none; color:var(--mute); font-size:14px; padding:6px 14px; }
-  #recTabs button[aria-selected="true"] { background:#1f1f1f; color:var(--fg); }
+  body.wide #sitBtn, body.wide #tasksBtn, body.wide #tasksClose, body.wide #sitClose { display:none !important; }
+  /* 列の見出し（セッション・頼んだ件）。数は細く */
+  .side-h, .tgh { display:flex; align-items:baseline; gap:8px; padding:16px 16px 8px; font-size:14px; font-weight:600; color:var(--w-t1); }
+  .side-h .n, .tgh .n { font-weight:400; font-size:12px; color:var(--w-t3); font-variant-numeric:tabular-nums; }
+  .tgs { padding:12px 10px 4px; font-size:12px; color:var(--w-t3); }
+  /* セッションの一覧。1 行目に場所（フォルダ）、2 行目に題 */
+  #sessions { flex:none; max-height:45%; overflow-y:auto; display:flex; flex-direction:column; gap:2px; padding:0 8px 12px; border-bottom:1px solid var(--w-rule); }
+  .sess { position:relative; display:flex; align-items:center; gap:8px; text-align:left; border:none; border-radius:6px; background:none; color:var(--w-t2); font:inherit; font-size:13px; line-height:1.35; padding:6px 10px 6px 16px; }
+  .sess::before, body.wide .task::before { content:""; position:absolute; left:5px; top:8px; bottom:8px; width:3px; border-radius:2px; background:var(--lane, transparent); }
+  .sess:hover { background:var(--w-hover); }
+  .sess.on { background:var(--w-sel); }
+  .sess.hub { margin-bottom:8px; } .sess.hub::after { content:""; position:absolute; left:8px; right:8px; bottom:-5px; border-bottom:1px solid var(--w-rule); }
+  .sess.blocked { --lane:var(--s-wait); } .sess.working { --lane:var(--s-run); }
+  .sess .nm { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .sess .pj { color:var(--w-t1); font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .sep { display:none; }
+  .sess .tt { font-size:12px; color:var(--w-t3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .st { flex:none; font-size:11px; color:var(--w-t3); }
+  .sess.blocked .st { color:var(--s-wait); } .sess.working .st { color:var(--s-run); } .sess.done .st { color:var(--s-done); }
+  /* 頼んだ件。指示の文は 2 行で切り、押すと全文 */
+  body.wide #tasks { flex:1; min-height:0; max-height:none; gap:0; padding:0 8px 16px; border-bottom:none; background:none; }
+  body.wide #tasks .top { display:none; }
+  body.wide #taskList { display:flex; flex-direction:column; gap:2px; }
+  body.wide .task { position:relative; gap:2px; padding:8px 10px 8px 16px; border:none; border-radius:6px; background:none; font-size:13px; line-height:1.5; }
+  body.wide .task[aria-expanded]:hover { background:var(--w-hover); }
+  body.wide .task .tl { display:flex; gap:8px; font-size:12px; }
+  body.wide .task .st { flex:1; color:var(--lane, var(--w-t3)); }
+  body.wide .task .tm { color:var(--w-t3); font-variant-numeric:tabular-nums; }
+  body.wide .task .pj { color:var(--w-t1); font-weight:600; } body.wide .task .tt { color:var(--w-t2); }
+  body.wide .task .what { color:var(--w-t3); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  body.wide .task.open .what { display:block; }
+  body.wide .task .note { color:var(--w-t3); }
+  body.wide .task.ended .pj, body.wide .task.ended .tt { color:var(--w-t2); font-weight:400; }
+  [data-lane="wait"] { --lane:var(--s-wait); } [data-lane="run"] { --lane:var(--s-run); } [data-lane="done"] { --lane:var(--s-done); } [data-lane="bad"] { --lane:var(--s-bad); }
+  /* 真ん中: 承認のカード・会話・入力。ハブの返事は吹き出しにせず、読みやすい幅の本文として出す */
+  body.wide #asks { grid-area:asks; padding:12px 32px 10px; background:var(--w-bg); border-bottom:1px solid var(--w-rule); }
+  body.wide .ask { border:none; border-left:3px solid var(--s-wait); border-radius:6px; background:#1c1910; padding:10px 14px; }
+  body.wide .ask button { height:36px; font-size:14px; border-radius:8px; }
+  body.wide #log { grid-area:log; min-height:0; padding:24px 32px 12px; gap:20px; }
+  body.wide .msg.ai { max-width:46em; background:none; border:none; border-left:2px solid var(--w-rule); border-radius:0; padding:2px 0 2px 18px; font-size:15px; line-height:1.8; color:var(--w-t1); }
+  body.wide .msg.ai.speaking { border-left-color:var(--ok); }
+  body.wide .msg.me { max-width:min(70%, 38em); padding:8px 14px; border-radius:14px 14px 4px 14px; line-height:1.7; }
+  body.wide .lead { font-weight:700; color:#fff; }
+  body.wide .sys { max-width:46em; color:var(--w-t3); }
+  /* 入力。文字の欄を主に、話す・停止は小さく、相手と声と同じ行に */
+  body.wide #bar { grid-area:bar; display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr) auto auto; grid-template-areas:"st st st st" "ty ty ty ty" "ag vo tk sb";
+    gap:8px; padding:10px 32px 16px; background:var(--w-bg); border-top:1px solid var(--w-rule); }
+  body.wide #bar > .row:not(#typedForm) { display:contents; }
+  body.wide #status { grid-area:st; } body.wide #typedForm { grid-area:ty; }
+  body.wide #agent { grid-area:ag; } body.wide #speaker { grid-area:vo; } body.wide #talk { grid-area:tk; } body.wide #stop { grid-area:sb; }
+  body.wide #agent, body.wide #speaker { height:36px; padding:0 10px; background:var(--w-field); border-color:var(--w-rule); color:var(--w-t2); }
+  body.wide #talk, body.wide #stop { height:36px; padding:0 16px; font-size:14px; border-radius:8px; border:1px solid var(--w-line); background:var(--w-field); color:var(--w-t1); }
+  body.wide #talk { min-width:9.5em; } body.wide #talk.rec { background:var(--rec); border-color:var(--rec); }
+  body.wide #typed { height:46px; font-size:15px; padding:0 14px; background:var(--w-field); border-color:var(--w-line); }
+  body.wide #typed:focus { outline:none; border-color:var(--s-run); }
+  body.wide #send { width:auto; height:46px; padding:0 22px; background:var(--w-go); color:#fff; font-weight:600; }
+  /* 右: 記録のタブ */
+  #recTabs { display:flex; gap:22px; padding:0 20px; border-bottom:1px solid var(--w-rule); }
+  #recTabs button { border:none; border-bottom:2px solid transparent; border-radius:0; background:none; color:var(--w-t3); font-size:14px; font-weight:600; padding:14px 0 10px; margin-bottom:-1px; }
+  #recTabs button[aria-selected="true"] { color:var(--w-t1); border-bottom-color:var(--w-t1); }
   #recTabs .n { margin-left:6px; font-size:11px; background:#6b5a2a; color:#fff; border-radius:8px; padding:0 6px; }
-  #memPanel { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:8px 12px 16px; }
-  .memT h4 { display:flex; gap:8px; margin:8px 0 4px; font-size:13px; color:#c9b77a; }
-  .memT h4 .use { margin-left:auto; color:var(--mute); font-weight:400; font-variant-numeric:tabular-nums; }
-  .mem, .memAdd { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1px solid #2f3a52; border-radius:10px; background:#161b29; font-size:13px; }
-  .memAdd { border-style:dashed; background:none; }
+  body.wide #situation { flex:1; min-height:0; max-height:none; padding:12px 20px 24px; gap:8px; border-bottom:none; background:none; }
+  body.wide #situation .top { font-size:12px; color:var(--w-t3); }
+  body.wide #sitBody h4 { margin:12px 0 2px; font-size:13px; color:var(--w-t1); }
+  body.wide .topic { border:none; border-top:1px solid var(--w-rule); border-radius:0; background:none; padding:10px 0; }
+  body.wide .sitHead { color:var(--w-t3); }
+  body.wide .sitHead button:not(.sure) { border:1px solid var(--w-line); background:none; color:var(--w-t2); font-size:12px; padding:4px 10px; }
+  body.wide .sitHead button.sure { background:#b8862e; color:#111; font-weight:600; }
+  /* 記憶。字数は上限との棒でも出す（8 割で黄、95% で赤）。長い項目は 4 行で切り、直す・消すはマウスを載せた項目だけに出す */
+  #memPanel { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:10px; padding:14px 20px 24px; }
+  #memPanel > .sitMeta { line-height:1.6; }
+  .memT { display:flex; flex-direction:column; }
+  .memT h4 { display:flex; align-items:baseline; gap:4px; margin:10px 0 6px; font-size:14px; font-weight:600; color:var(--w-t1); }
+  .memT h4 .file { font-size:12px; font-weight:400; color:var(--w-t3); }
+  .memT h4 .use { margin-left:auto; font-size:12px; font-weight:400; color:var(--w-t2); font-variant-numeric:tabular-nums; }
+  .meter { height:4px; margin-bottom:4px; border-radius:2px; background:var(--w-rule); overflow:hidden; }
+  .meter i { display:block; height:100%; background:var(--s-run); } .meter.near i { background:var(--s-wait); } .meter.full i { background:var(--s-bad); }
+  .mem { position:relative; display:flex; flex-direction:column; align-items:flex-start; gap:6px; padding:10px 0; border-top:1px solid var(--w-rule); font-size:13.5px; line-height:1.7; color:#dcdde0; }
+  .mem > * { align-self:stretch; } .mem > .more { align-self:flex-start; }
   .mem .text { white-space:pre-wrap; overflow-wrap:anywhere; }
-  .mem .acts, .memAdd .acts { display:flex; gap:6px; flex-wrap:wrap; }
-  .mem button, .memAdd button { border:none; border-radius:8px; background:#2a3350; color:var(--fg); font-size:13px; padding:5px 12px; }
-  .mem button.sure { background:#b8862e; color:#111; font-weight:600; }
-  .mem textarea, .memAdd textarea { width:100%; min-height:5em; resize:vertical; font:14px/1.5 -apple-system, "Hiragino Sans", sans-serif; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; padding:6px 8px; }
-  .memAdd select { flex:none; align-self:flex-start; font-size:13px; }
+  .mem .text.clamp { display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
+  .mem .acts, .memAdd .acts { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .mem button, .memAdd button { border:1px solid var(--w-line); border-radius:6px; background:none; color:var(--w-t2); font-size:12px; padding:3px 10px; }
+  .mem button:hover, .memAdd button:hover { background:var(--w-hover); color:var(--w-t1); }
+  .mem .more { border:none; padding:0; color:var(--w-t3); }
+  .mem .more:hover { background:none; color:var(--w-t1); }
+  .mem button.go, .memAdd button.go { border-color:var(--w-go); background:var(--w-go); color:#fff; font-weight:600; padding:4px 14px; }
+  .mem button.sure { border-color:#b8862e; background:#b8862e; color:#111; font-weight:600; }
+  /* マウスのある画面では、直す・消すは項目の右上に重ねて出す（載せた項目・キーで移った項目・消すの確かめ中だけ） */
+  @media (hover:hover) {
+    .mem:not(.editing) .acts { position:absolute; top:6px; right:0; padding:2px 0 2px 24px; background:linear-gradient(to right, transparent, var(--w-col) 20px); }
+    .mem:not(.editing):not(.confirm):not(:hover):not(:focus-within) .acts { opacity:0; }
+    .mem:not(.editing) .acts button { background:var(--w-col); } .mem:not(.editing) .acts button:hover { background:var(--w-hover); } .mem:not(.editing) .acts button.sure { background:#b8862e; }
+  }
+  .mem textarea, .memAdd textarea { width:100%; min-height:5em; resize:vertical; font:14px/1.6 -apple-system, "Hiragino Sans", sans-serif; background:var(--w-field); color:var(--fg); border:1px solid var(--w-line); border-radius:8px; padding:8px 10px; }
+  .mem textarea:focus, .memAdd textarea:focus { outline:none; border-color:var(--s-run); }
+  .memAdd { display:flex; flex-direction:column; gap:8px; margin-top:14px; padding:14px; border:1px dashed var(--w-line); border-radius:10px; }
+  .memAdd .ttl { font-size:14px; font-weight:600; color:var(--w-t1); }
+  .memAdd select { flex:none; align-self:flex-start; height:32px; font-size:13px; background:var(--w-field); border-color:var(--w-line); }
   #memNote { font-size:12px; color:#d8c88f; overflow-wrap:anywhere; } #memNote.bad { color:#e07a74; }
 </style>
 </head>
@@ -205,9 +281,23 @@ function bubble(role, text, extra = '') {
     el.classList.add('md');
     el.innerHTML = DOMPurify.sanitize(marked.parse(text));
     el.querySelectorAll('table').forEach(t => { const w = document.createElement('div'); w.className = 'tw'; t.replaceWith(w); w.appendChild(t); });
+    markLeads(el);
   } else el.textContent = text;
   $('log').appendChild(el); $('log').scrollTop = $('log').scrollHeight;
   return el;
+}
+// 行の頭の【見出し】に印を付ける（PC の幅で太く出す。スマホでは見た目を変えない）。文字の節を分けるだけで、HTML は組み立てない
+function markLeads(root) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), hits = [];
+  for (let n = w.nextNode(); n; n = w.nextNode()) {
+    const prev = n.previousSibling;
+    if ((!prev || prev.nodeName === 'BR') && /^【[^】\n]{1,40}】/.test(n.data)) hits.push(n);
+  }
+  for (const n of hits) {
+    const m = /^【[^】\n]{1,40}】/.exec(n.data), s = document.createElement('span');
+    s.className = 'lead'; s.textContent = m[0];
+    n.data = n.data.slice(m[0].length); n.before(s);
+  }
 }
 function sys(text) { const el = document.createElement('div'); el.className = 'sys'; el.textContent = text; $('log').appendChild(el); $('log').scrollTop = $('log').scrollHeight; }
 const curAgent = () => agents.find(a => a.pane === $('agent').value);
@@ -512,6 +602,7 @@ async function loadTasks() {
   const list = $('taskList');
   let rows; try { rows = await (await fetch('/api/hub/tasks')).json(); } catch { list.textContent = '読めませんでした（接続を確かめてください）'; return; }
   list.innerHTML = '';
+  if (wide) { drawTasksWide(list, rows); return; }
   if (!rows.length) { list.textContent = '頼んだ件はありません（終わった件は3日で消えます）'; return; }
   for (const t of rows) {
     const [label, cls] = TASK_STATUS[t.status] || [t.status, ''];
@@ -522,6 +613,36 @@ async function loadTasks() {
     el.append(st, name, what);
     if (t.note) { const n = document.createElement('div'); n.className = 'note'; n.textContent = t.note; el.appendChild(n); }
     list.appendChild(el);
+  }
+}
+// PC の左の頼んだ件。動いている件を上に、終わった件を下に分け、指示の文は 2 行で切る（押すと全文。開いた件は取り直しても開いたまま）
+const tasksOpen = new Set();
+const hm = min => { const d = new Date(Date.now() - min * 60000), t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return d.toDateString() === new Date().toDateString() ? t : `${d.getMonth() + 1}/${d.getDate()} ${t}`; };
+const TASK_LANE = { blocked: 'wait', watching: 'run', background: 'run', done: 'done' };
+function drawTasksWide(list, rows) {
+  const h = node('div', 'tgh', '頼んだ件'); h.appendChild(node('span', 'n', rows.length ? `${rows.length} 件` : ''));
+  list.appendChild(h);
+  if (!rows.length) { list.appendChild(node('div', 'tgs', 'まだありません。ハブに頼むとここに出ます')); return; }
+  const active = rows.filter(t => (TASK_STATUS[t.status] || [])[1] === 'active'), ended = rows.filter(t => !active.includes(t));
+  for (const [title, group] of [['動いている', active], ['終わった（3日で一覧から消えます）', ended]]) {
+    if (!group.length) continue;
+    list.appendChild(node('div', 'tgs', `${title}　${group.length}`));
+    for (const t of group) {
+      const [label, cls] = TASK_STATUS[t.status] || [t.status, ''];
+      const el = node('div', 'task' + (group === ended ? ' ended' : '') + (tasksOpen.has(t.id) ? ' open' : ''));
+      const lane = TASK_LANE[t.status] || (cls === 'bad' ? 'bad' : ''); if (lane) el.dataset.lane = lane;
+      const tl = node('div', 'tl'); tl.append(node('span', 'st', label), node('span', 'tm', hm(t.since_minutes)));
+      const nm = node('div', 'nm'); nm.append(node('span', 'pj', t.project), node('span', 'tt', '｜' + t.title));
+      el.append(tl, nm, node('div', 'what', `${TASK_KIND[t.kind] || t.kind}${t.text ? '：' + t.text : ''}（${hm(t.age_minutes)}）`));
+      if (t.note) el.appendChild(node('div', 'note', t.note));
+      if ((t.text || '').length > 40) {  // 2 行に収まらない文だけ、押して開けるように
+        el.tabIndex = 0; el.setAttribute('role', 'button'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id)));
+        const flip = () => { tasksOpen.has(t.id) ? tasksOpen.delete(t.id) : tasksOpen.add(t.id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id))); };
+        el.onclick = flip; el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
+      }
+      list.appendChild(el);
+    }
   }
 }
 const phone = { tasks: false, sit: false };  // スマホの幅での開閉（PC の幅から戻ったとき、この状態に戻す）
@@ -797,9 +918,13 @@ const SESS_ST = { idle: '待機', working: '作業中', blocked: '承認・入�
 function renderSessions() {
   if (!wide) return;
   const box = $('sessions'); box.innerHTML = '';
+  $('side').querySelector('.side-h').replaceChildren('セッション', node('span', 'n', `${agents.length}`));
   for (const a of agents) {
-    const b = node('button', `sess ${a.status || ''}${a.pane === $('agent').value ? ' on' : ''}`);
-    b.appendChild(node('span', 'nm', a.hub ? `ハブ${a.hermes ? '（Hermes）' : ''}` : a.hermes ? 'Hermes（話し相手）' : `${a.cwd.split('/').pop()}｜${a.title}`));
+    const b = node('button', `sess ${a.status || ''}${a.pane === $('agent').value ? ' on' : ''}${a.hub ? ' hub' : ''}`);
+    const nm = node('span', 'nm');  // 1 行目に場所（フォルダ）、2 行目に題。文字としては今までどおり「場所｜題」
+    if (a.hub || a.hermes) nm.appendChild(node('span', 'pj', a.hub ? `ハブ${a.hermes ? '（Hermes）' : ''}` : 'Hermes（話し相手）'));
+    else nm.append(node('span', 'pj', a.cwd.split('/').pop()), node('span', 'sep', '｜'), node('span', 'tt', a.title));
+    b.appendChild(nm);
     b.appendChild(node('span', 'st', SESS_ST[a.status] || a.status || ''));
     b.onclick = () => { if ($('agent').value === a.pane) return; $('agent').value = a.pane; $('agent').dispatchEvent(new Event('change')); };
     box.appendChild(b);
@@ -838,7 +963,7 @@ function drawMemory() {
   if (!d || memBusy || memHubHold || memTyping()) return;  // 打っている途中・書いている最中は描き直さない（中身は状態に残っている）
   const box = $('memPanel'); box.innerHTML = '';
   if (!d.on) { box.appendChild(node('div', 'sitMeta', 'Hermes がハブでないか、置き場がありません')); return; }
-  box.appendChild(node('div', 'sitMeta', 'ハブ（Hermes）の記憶です。ハブの前提には、次に会話が新しくなったとき（毎朝の切り替えか、下の「ハブの会話を新しくする」）から入ります。'));
+  box.appendChild(node('div', 'sitMeta', 'ハブ（Hermes）の記憶です。直した記憶は、次に会話が新しくなったとき（毎朝の切り替えか、下の「ハブの会話を新しくする」）からハブに効きます。'));
   const hub = agents.find(a => a.hermes && a.hub);
   if (hub) box.appendChild(hubSessionRow(hub, v => { memHubHold = v; if (!v) drawMemory(); }, (msg, bad) => { memNote = [msg, bad]; loadMemory(); }));
   if (memNote) { const n = node('div', memNote[1] ? 'bad' : null, memNote[0]); n.id = 'memNote'; box.appendChild(n); }
@@ -850,9 +975,13 @@ function drawMemory() {
     for (const e of d.targets[t].entries) shown.add(e.v);
   }
   for (const t of ['user', 'memory']) {
-    const tt = d.targets[t], sec = node('div', 'memT'), h = node('h4', null, MEM_T[t]);
-    h.appendChild(node('span', 'use', tt.limit ? `${tt.chars} / ${tt.limit} 字` : `${tt.chars} 字`));
+    const tt = d.targets[t], sec = node('div', 'memT'), h = node('h4'), [name, file] = MEM_T[t].split('（');
+    h.append(node('span', null, name), node('span', 'file', '（' + file), node('span', 'use', tt.limit ? `${tt.chars} / ${tt.limit} 字` : `${tt.chars} 字`));
     sec.appendChild(h);
+    if (tt.limit) {  // 上限との棒（8 割で黄、95% で赤）
+      const r = Math.min(1, tt.chars / tt.limit), m = node('div', 'meter' + (r >= 0.95 ? ' full' : r >= 0.8 ? ' near' : '')), bar = node('i');
+      bar.style.width = (r * 100).toFixed(1) + '%'; m.appendChild(bar); sec.appendChild(m);
+    }
     if (tt.status === 'unreadable') sec.appendChild(node('div', 'sitMeta bad', 'このファイルは読めません（symlink・大きすぎる・壊れた文字など）。画面では変えません'));
     if (tt.enabled === false) sec.appendChild(node('div', 'sitMeta', 'この記憶は Hermes の設定で切ってあります'));
     for (const e of tt.entries) sec.appendChild(memCard(t, e, tt.status === 'ok'));
@@ -862,7 +991,13 @@ function drawMemory() {
   }
   for (const v of [...memConfirm.keys()]) if (!shown.has(v)) memConfirm.delete(v);  // 消すの確かめは、項目が見えなくなったら外す（安全側）
   box.appendChild(memAddForm());
+  // 4 行で切った項目のうち、実際にはみ出しているものだけに「続きを表示」を出す（測るのは描いたあと）
+  requestAnimationFrame(() => box.querySelectorAll('.mem .text.clamp').forEach(x => {
+    const more = x.parentElement.querySelector(':scope > .more');
+    if (more) more.hidden = x.scrollHeight <= x.clientHeight + 2;
+  }));
 }
+const memOpen = new Set();  // 全文を出している項目の版
 async function memWrite(op, body, okText, onOk = () => {}) {
   memBusy = true;
   let r; try { r = await postJSON('/api/hermes/memory/' + op, body); } catch { r = { ok: false, reason: 'unknown', why: '本体から答えが届きませんでした' }; }
@@ -879,8 +1014,9 @@ function memCard(t, e, editable) {
   if (!editable) { c.appendChild(node('div', 'text', e.text)); return c; }
   c.dataset.v = e.v;
   if (memEdits.has(e.v)) {  // 直している途中（描き直しても、開いたときの版と打った文のまま）
+    c.classList.add('editing');
     const ed = memEdits.get(e.v), ta = node('textarea'); ta.value = ed.text; ta.oninput = () => { ed.text = ta.value; };
-    const row = node('div', 'acts'), save = node('button', null, '保存'), cancel = node('button', null, 'やめる');
+    const row = node('div', 'acts'), save = node('button', 'go', '保存'), cancel = node('button', null, 'やめる');
     cancel.onclick = () => { memEdits.delete(e.v); drawMemory(); };
     save.onclick = async () => {
       save.disabled = cancel.disabled = true; save.textContent = '保存しています…';
@@ -889,13 +1025,17 @@ function memCard(t, e, editable) {
     row.append(save, cancel); c.append(ta, row);
     return c;
   }
-  c.appendChild(node('div', 'text', e.text));
+  const open = memOpen.has(e.v), more = node('button', 'more', open ? 'たたむ' : '続きを表示');
+  c.appendChild(node('div', open ? 'text' : 'text clamp', e.text));
+  more.hidden = !open;  // 切っているときは、描いたあとに測って、はみ出していれば出す
+  more.onclick = () => { open ? memOpen.delete(e.v) : memOpen.add(e.v); drawMemory(); };
+  c.appendChild(more);
   const acts = node('div', 'acts'), ed = node('button', null, '直す'), rm = node('button', null, '消す');
   ed.onclick = () => { memEdits.set(e.v, { target: t, text: e.text }); drawMemory(); const ta = $('memPanel').querySelector(`.mem[data-v="${e.v}"] textarea`); if (ta) ta.focus(); };
-  if ((memConfirm.get(e.v) || 0) > Date.now()) { rm.className = 'sure'; rm.textContent = 'この項目を消す'; }
+  if ((memConfirm.get(e.v) || 0) > Date.now()) { rm.className = 'sure'; rm.textContent = 'この項目を消す'; c.classList.add('confirm'); }
   rm.onclick = async () => {
     if ((memConfirm.get(e.v) || 0) <= Date.now()) {  // 1段目: 確かめを出す。10 秒で戻る
-      memConfirm.set(e.v, Date.now() + 10000); rm.className = 'sure'; rm.textContent = 'この項目を消す';
+      memConfirm.set(e.v, Date.now() + 10000); rm.className = 'sure'; rm.textContent = 'この項目を消す'; c.classList.add('confirm');
       setTimeout(() => { if ((memConfirm.get(e.v) || 0) <= Date.now()) { memConfirm.delete(e.v); drawMemory(); } }, 10050); return;
     }
     memConfirm.delete(e.v); rm.disabled = ed.disabled = true; rm.textContent = '消しています…';
@@ -905,18 +1045,18 @@ function memCard(t, e, editable) {
   return c;
 }
 function memOrphan(t, v, ed) {  // 直す途中のまま、項目が見当たらなくなった（Hermes が書き換えた・消した、またはファイルを読めない）。文は残し、足すか捨てるかを選んでもらう
-  const c = node('div', 'mem'); c.dataset.v = v;
+  const c = node('div', 'mem editing'); c.dataset.v = v;
   c.appendChild(node('div', 'sitMeta bad', '直している途中の項目が、いまの記憶に見当たりません（Hermes が書き換えた・消した、またはファイルを読めない）。文はここに残してあります。新しい項目として足すか、捨ててください'));
   const ta = node('textarea'); ta.value = ed.text; ta.oninput = () => { ed.text = ta.value; };
-  const row = node('div', 'acts'), add = node('button', null, '新しい項目として足す'), drop = node('button', null, '捨てる');
+  const row = node('div', 'acts'), add = node('button', 'go', '新しい項目として足す'), drop = node('button', null, '捨てる');
   add.onclick = async () => { add.disabled = drop.disabled = true; await memWrite('add', { target: t, content: ed.text }, '足しました', () => memEdits.delete(v)); };
   drop.onclick = () => { memEdits.delete(v); drawMemory(); };
   row.append(add, drop); c.append(ta, row);
   return c;
 }
 function memAddForm() {
-  const f = node('div', 'memAdd'), sel = node('select'), ta = node('textarea'), b = node('button', null, '足す');
-  f.appendChild(node('div', 'sitMeta', '記憶を足す'));
+  const f = node('div', 'memAdd'), sel = node('select'), ta = node('textarea'), b = node('button', 'go', '足す');
+  f.appendChild(node('div', 'ttl', '記憶を足す'));
   for (const [k, v] of Object.entries(MEM_T)) { const o = node('option', null, v); o.value = k; sel.appendChild(o); }
   sel.value = memDraft.target; sel.onchange = () => { memDraft.target = sel.value; };
   ta.placeholder = '覚えてほしいこと（例: 録音の「山だ」は山田のこと）'; ta.value = memDraft.text;
