@@ -182,6 +182,22 @@ def run(page, who):
           (wait(lambda: "Hermes のコンテナ（hermes）で台本を動かせません" in body(page)), btns(0)), (True, ["捨てる"]))
     page.click("#sitClose")
 
+    # ハブの会話を新しくする（2段。1回目は確かめだけ）
+    page.click("#sitBtn")
+    page.wait_for_selector("#sitBody .sitHead")
+    row = lambda: page.locator("#sitBody .sitHead").nth(1)
+    before = s.hermes_session()
+    check(f"{who} ハブの会話の欄に、いまの会話の名前と、毎朝4時に新しくなることが出る",
+          wait(lambda: before in (row().text_content() or "") and "毎朝4時に新しくなります" in (row().text_content() or "")), True)
+    row().locator("button").click()
+    check(f"{who} 「ハブの会話を新しくする」の1回目は確かめを出すだけ（新しくしない）", (row().locator("button").text_content(), s.hermes_session()),
+          ("前の会話を持ち越さずに始める", before))
+    row().locator("button").click()
+    check(f"{who} 2回目で新しくし、案内と新しい会話の名前を出す",
+          (wait(lambda: "ハブの会話を新しくしました" in body(page)), wait(lambda: s.hermes_session() != before and s.hermes_session() in (row().text_content() or ""))),
+          (True, True))
+    page.click("#sitClose")
+
 
 with sync_playwright() as pw:
     b = pw.chromium.launch()

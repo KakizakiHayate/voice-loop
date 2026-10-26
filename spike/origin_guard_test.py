@@ -65,6 +65,7 @@ BLOCK = [
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/api/situation"},  # 画面用の API
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/api/answer", "_method": "POST"},  # 承認に答える（画面の口）
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/api/facts", "_method": "POST"},
+    {"host": "127.0.0.1:8790", "_container": True, "x-vl-key": "k1", "_path": "/api/hermes/session/new", "_method": "POST"},  # ハブの会話を新しくする（画面の口）
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/"},  # 画面
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/ws", "_method": ""},  # WebSocket
     {"host": "127.0.0.1:8790", "_container": True, "_path": "/api/hub/sessions"},  # hubctl の口でも鍵なし
