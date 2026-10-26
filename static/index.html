@@ -117,9 +117,51 @@
   .fact button { flex:none; border:none; background:none; color:var(--mute); font-size:15px; padding:0 6px; }
   #factForm { display:flex; gap:6px; }
   #factText { flex:1; min-width:0; font-size:16px; padding:6px 10px; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; }
+  /* PC（横幅 1100px 以上で body に wide）。3 列: 左にセッションの一覧と頼んだ件、真ん中に会話、右に記録（記憶・状況）。スマホの幅では何も変えない */
+  #side, #rec { display:none; }
+  body.wide { display:grid; grid-template-columns:300px minmax(0,1fr) 440px; grid-template-rows:auto minmax(0,1fr) auto;
+    grid-template-areas:"side asks rec" "side log rec" "side bar rec"; }
+  body.wide #side { grid-area:side; display:flex; flex-direction:column; min-height:0; background:#141414; border-right:1px solid #262626; }
+  body.wide #rec { grid-area:rec; display:flex; flex-direction:column; min-height:0; background:#141414; border-left:1px solid #262626; }
+  body.wide #asks { grid-area:asks; padding-top:8px; }
+  body.wide #log { grid-area:log; min-height:0; padding:16px 24px 8px; }
+  body.wide #bar { grid-area:bar; padding:10px 24px 14px; }
+  body.wide #bar > * { order:2; } body.wide #status { order:0; } body.wide #typedForm { order:1; }  /* PC は文字で打つのが主なので、文字の欄を上に */
+  body.wide .msg { max-width:min(80%, 760px); }
+  body.wide #talk, body.wide #stop { height:48px; font-size:16px; }
+  body.wide #sitBtn, body.wide #tasksBtn, body.wide #tasksClose, body.wide #sitClose { display:none !important; }
+  body.wide #tasks { flex:1; min-height:0; max-height:none; padding-top:8px; border-bottom:none; background:none; }
+  body.wide #situation { flex:1; min-height:0; max-height:none; padding-top:8px; border-bottom:none; background:none; }
+  body.wide #rec[data-tab="mem"] #situation, body.wide #rec[data-tab="sit"] #memPanel { display:none !important; }
+  body.wide .sitHead button.sure { background:#b8862e; color:#111; font-weight:600; }
+  .side-h { font-size:12px; color:var(--mute); padding:8px 12px 0; }
+  #sessions { flex:none; max-height:45%; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding:6px 10px 10px; border-bottom:1px solid #262626; }
+  .sess { display:flex; align-items:center; gap:6px; text-align:left; border:1px solid #2f2f2f; border-radius:8px; background:#1a1a1a; color:var(--fg); font-size:13px; padding:6px 8px; }
+  .sess.on { border-color:var(--ok); background:#16261d; }
+  .sess .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sess .st { flex:none; font-size:11px; color:var(--mute); }
+  .sess.blocked .st { color:#e6c36a; } .sess.working .st { color:#7fb4ff; }
+  #recTabs { display:flex; gap:4px; padding:8px 10px 0; border-bottom:1px solid #262626; }
+  #recTabs button { border:none; border-radius:8px 8px 0 0; background:none; color:var(--mute); font-size:14px; padding:6px 14px; }
+  #recTabs button[aria-selected="true"] { background:#1f1f1f; color:var(--fg); }
+  #recTabs .n { margin-left:6px; font-size:11px; background:#6b5a2a; color:#fff; border-radius:8px; padding:0 6px; }
+  #memPanel { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding:8px 12px 16px; }
+  .memT h4 { display:flex; gap:8px; margin:8px 0 4px; font-size:13px; color:#c9b77a; }
+  .memT h4 .use { margin-left:auto; color:var(--mute); font-weight:400; font-variant-numeric:tabular-nums; }
+  .mem, .memAdd { display:flex; flex-direction:column; gap:6px; padding:8px 10px; border:1px solid #2f3a52; border-radius:10px; background:#161b29; font-size:13px; }
+  .memAdd { border-style:dashed; background:none; }
+  .mem .text { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .mem .acts, .memAdd .acts { display:flex; gap:6px; flex-wrap:wrap; }
+  .mem button, .memAdd button { border:none; border-radius:8px; background:#2a3350; color:var(--fg); font-size:13px; padding:5px 12px; }
+  .mem button.sure { background:#b8862e; color:#111; font-weight:600; }
+  .mem textarea, .memAdd textarea { width:100%; min-height:5em; resize:vertical; font:14px/1.5 -apple-system, "Hiragino Sans", sans-serif; background:var(--btn); color:var(--fg); border:1px solid #333; border-radius:8px; padding:6px 8px; }
+  .memAdd select { flex:none; align-self:flex-start; font-size:13px; }
+  #memNote { font-size:12px; color:#d8c88f; overflow-wrap:anywhere; } #memNote.bad { color:#e07a74; }
 </style>
 </head>
 <body>
+  <div id="side"><div class="side-h">セッション</div><div id="sessions"></div></div>
+  <div id="rec" data-tab="mem"><div id="recTabs" role="tablist"><button id="tabMem" role="tab" aria-selected="true">記憶</button><button id="tabSit" role="tab" aria-selected="false">状況<span class="n" id="sitCount" hidden></span></button></div><div id="memPanel"></div></div>
   <div id="asks"></div>
   <div id="tasks" hidden><div class="top"><span>頼んだ件（ハブ経由で送った指示と、その見張り）</span><button id="tasksClose" aria-label="閉じる">✕</button></div><div id="taskList"></div></div>
   <div id="situation" hidden><div class="top"><span>いまの状況（録音・予定・メールから）</span><button id="sitClose" aria-label="閉じる">✕</button></div><div id="sitBody"></div><form id="factForm"><input id="factText" placeholder="覚えてほしいこと（打った文のまま覚えます）" maxlength="150" autocomplete="off"><button type="submit">覚える</button></form></div>
@@ -209,6 +251,7 @@ async function loadAgents() {
   const sig = JSON.stringify(list.map(a => [a.pane, a.key, a.title, a.status, a.hermes ? a.session : '']));  // Hermes は会話の名前が変わる（💡 に出す）
   if (sig === agentsSig) return;
   agents = list; agentsSig = sig;
+  setTimeout(renderSessions);  // PC の左の一覧（select を作ったあとで、選んでいるものに印を付ける）
   const saved = localStorage.getItem(WANT);
   const want = saved === null ? 'hub' : saved; // 初めて開いたときはハブ
   const sel = $('agent'); sel.innerHTML = '';
@@ -481,7 +524,10 @@ async function loadTasks() {
     list.appendChild(el);
   }
 }
-function showTasks(open) {
+const phone = { tasks: false, sit: false };  // スマホの幅での開閉（PC の幅から戻ったとき、この状態に戻す）
+let wide = false;  // PC の形（横幅 1100px 以上）
+function showTasks(open) { phone.tasks = open; if (!wide) runTasks(open); }
+function runTasks(open) {  // 見える・10 秒ごとに取り直す、を切り替える（PC では常に開く）
   $('tasks').hidden = !open; $('tasksBtn').setAttribute('aria-pressed', String(open));
   clearInterval(tasksTimer); tasksTimer = null;
   if (open) { loadTasks(); tasksTimer = setInterval(() => { if (!document.hidden) loadTasks(); }, 10000); }
@@ -569,23 +615,23 @@ function hskCard(it) {
   return c;
 }
 // ハブ（Hermes）の会話を新しくする: 前の会話を持ち越さずに始め直す（設定した時刻にも毎朝新しくなる。既定 4 時）。記憶と手順書は残り、直した記憶はここから効く。2段
-function hubSessionRow(a) {
+function hubSessionRow(a, hold = v => { sitHold = v; }, done = (msg, bad) => { sitNote = [msg, bad]; loadSituation(); }) {
   const row = node('div', 'sitHead');
   const when = a.reset_hour == null ? '日ごとには変わりません' : `毎朝${a.reset_hour}時に新しくなります`;
   row.appendChild(node('span', null, `ハブの会話: ${a.session}（${when}）`));
   const b = node('button', null, 'ハブの会話を新しくする');
   let timer = null;
-  const reset = () => { clearTimeout(timer); sitHold = false; b.className = ''; b.textContent = 'ハブの会話を新しくする'; };
+  const reset = () => { clearTimeout(timer); hold(false); b.className = ''; b.textContent = 'ハブの会話を新しくする'; };
   b.onclick = async () => {
     if (!b.classList.contains('sure')) {  // 1段目: 確かめを出す。10 秒で戻る
-      sitHold = true; b.className = 'sure'; b.textContent = '前の会話を持ち越さずに始める';
+      hold(true); b.className = 'sure'; b.textContent = '前の会話を持ち越さずに始める';
       timer = setTimeout(reset, 10000); return;
     }
     clearTimeout(timer); b.disabled = true; b.textContent = '新しくしています…';
     let r; try { r = await postJSON('/api/hermes/session/new', {}); } catch { r = { ok: false, reason: '本体に届きません' }; }
-    sitNote = r.ok ? [`ハブの会話を新しくしました（${r.session}）。Hermes の記憶と手順書は残ります`, false]
+    const note = r.ok ? [`ハブの会話を新しくしました（${r.session}）。Hermes の記憶と手順書は残ります`, false]
       : ['新しくできませんでした: ' + ({ off: 'Hermes がつながっていません', state: '状態を書けません' }[r.reason] || r.reason), true];
-    sys(sitNote[0]); sitHold = false; await loadAgents(); loadSituation();  // 一覧の会話の名前を取り直してから描く
+    sys(note[0]); hold(false); await loadAgents(); done(...note);  // 一覧の会話の名前を取り直してから描く
   };
   row.appendChild(b);
   return row;
@@ -629,6 +675,8 @@ async function loadSituation() {
     [d, h] = await Promise.all([fetch('/api/situation').then(r => r.json()), fetch('/api/hermes/skills').then(r => r.json()).catch(() => null)]);
   } catch { box.textContent = '読めませんでした（接続を確かめてください）'; return; }
   if (sitHold) return;  // 読んでいるあいだに「送る」が押された
+  const waiting = (h && h.on ? h.items.length : 0) + d.proposals.filter(p => p.state === 'open').length;
+  $('sitCount').hidden = !waiting; $('sitCount').textContent = String(waiting);  // PC の「状況」タブの数（手順の書き足しと提案）
   box.innerHTML = '';
   const head = node('div', 'sitHead');
   head.appendChild(node('span', null, !d.enabled ? '拾う役は切ってあります（config.env の VL_INTAKE=1 で動きます）'
@@ -700,7 +748,8 @@ async function loadSituation() {
     }
   }
 }
-function showSituation(open) {
+function showSituation(open) { phone.sit = open; if (!wide) runSituation(open); }
+function runSituation(open) {  // 見える・15 秒ごとに取り直す、を切り替える（PC では常に開く）
   $('situation').hidden = !open; $('sitBtn').setAttribute('aria-pressed', String(open));
   clearInterval(sitTimer); sitTimer = null;
   if (!open) { sitHold = false; sitNote = null; }
@@ -715,6 +764,140 @@ $('factForm').onsubmit = async ev => {
   if (r.ok) $('factText').value = ''; else sys('覚えられませんでした: ' + r.reason);
   loadSituation();
 };
+
+// ---------- PC の形（横幅 1100px 以上）: 3 列。スマホの幅では今のまま ----------
+// 頼んだ件（#tasks）と状況（#situation）は、同じ箱を左右の列へ移して常に開く（中の部品と入力の途中はそのまま）。戻すと元の場所とスマホでの開閉に戻る
+const WIDE = window.matchMedia('(min-width: 1100px)');
+const homeOf = {};
+for (const id of ['tasks', 'situation']) { const m = document.createComment(id); $(id).before(m); homeOf[id] = m; }
+let recTab = (() => { try { return localStorage.getItem('vl.recTab') === 'sit' ? 'sit' : 'mem'; } catch { return 'mem'; } })();
+function applyWide() {
+  if (WIDE.matches === wide) return;
+  wide = WIDE.matches;
+  document.body.classList.toggle('wide', wide);
+  if (wide) {
+    $('side').appendChild($('tasks')); $('rec').appendChild($('situation'));
+    runTasks(true); runSituation(true); setRecTab(recTab); renderSessions();
+  } else {
+    homeOf.tasks.after($('tasks')); homeOf.situation.after($('situation'));
+    runMemory(false); runTasks(phone.tasks); runSituation(phone.sit);
+  }
+}
+function setRecTab(t) {
+  recTab = t; try { localStorage.setItem('vl.recTab', t); } catch {}
+  $('rec').dataset.tab = t;
+  $('tabMem').setAttribute('aria-selected', String(t === 'mem')); $('tabSit').setAttribute('aria-selected', String(t === 'sit'));
+  runMemory(wide && t === 'mem');
+}
+$('tabMem').onclick = () => setRecTab('mem');
+$('tabSit').onclick = () => setRecTab('sit');
+
+// セッションの一覧（PC の左）。押すと、下の select の値を替えて change を送るだけ（選ぶ処理・覚える・履歴の読み直しは今のまま 1 つ）
+const SESS_ST = { idle: '待機', working: '作業中', blocked: '承認・入力待ち', done: '完了' };
+function renderSessions() {
+  if (!wide) return;
+  const box = $('sessions'); box.innerHTML = '';
+  for (const a of agents) {
+    const b = node('button', `sess ${a.status || ''}${a.pane === $('agent').value ? ' on' : ''}`);
+    b.appendChild(node('span', 'nm', a.hub ? `ハブ${a.hermes ? '（Hermes）' : ''}` : a.hermes ? 'Hermes（話し相手）' : `${a.cwd.split('/').pop()}｜${a.title}`));
+    b.appendChild(node('span', 'st', SESS_ST[a.status] || a.status || ''));
+    b.onclick = () => { if ($('agent').value === a.pane) return; $('agent').value = a.pane; $('agent').dispatchEvent(new Event('change')); };
+    box.appendChild(b);
+  }
+}
+$('agent').addEventListener('change', renderSessions);
+
+// Hermes の記憶（PC の右の「記憶」）。足す・直す・消す（消すは 2 段）。直す・足すの途中と消すの確かめの途中は、取り直しで消さない
+let memTimer = null, memHold = false, memGen = 0, memNote = null;
+const memDraft = { target: 'user', text: '' };  // 足す欄の打ちかけ（描き直しても残す）
+const MEM_T = { user: 'ユーザーについて（USER.md）', memory: 'メモ（MEMORY.md）' };
+const MEM_FAIL = {
+  stale: '画面が古くなっていました。読み直しました', changed: 'その項目は、いまの記憶にありません（Hermes が書き換えたか、消しました）。読み直しました',
+  refused: 'Hermes が断りました', invalid: '文の形が受け付けられません', busy: '前の書き込みが終わるのを待っています',
+  unverifiable: '前の書き込みが終わったか確かめられないので、書きません', state: '状態を書けないので、書きません',
+  off: 'Hermes がハブでないか、置き場がありません', unknown: '当たったか分かりません。読み直して確かめてください（自動では送り直しません）',
+};
+function runMemory(on) {
+  clearInterval(memTimer); memTimer = null;
+  if (on) { loadMemory(); memTimer = setInterval(() => { if (!document.hidden && !memHold) loadMemory(); }, 15000); }
+}
+async function loadMemory() {
+  const gen = ++memGen;
+  let d; try { d = await (await fetch('/api/hermes/memory')).json(); } catch { if (gen === memGen && !memHold) $('memPanel').textContent = '読めませんでした（接続を確かめてください）'; return; }
+  if (gen !== memGen || memHold) return;  // 古い取り直し・編集の途中は描かない
+  const box = $('memPanel'); box.innerHTML = '';
+  if (!d.on) { box.appendChild(node('div', 'sitMeta', 'Hermes がハブでないか、置き場がありません')); return; }
+  box.appendChild(node('div', 'sitMeta', 'ハブ（Hermes）の記憶です。ハブの前提には、次に会話が新しくなったとき（毎朝の切り替えか、下の「ハブの会話を新しくする」）から入ります。'));
+  const hub = agents.find(a => a.hermes && a.hub);
+  if (hub) box.appendChild(hubSessionRow(hub, v => { memHold = v; }, (msg, bad) => { memNote = [msg, bad]; loadMemory(); }));
+  if (memNote) { const n = node('div', memNote[1] ? 'bad' : null, memNote[0]); n.id = 'memNote'; box.appendChild(n); }
+  if (d.verify) box.appendChild(node('div', 'sitMeta bad', '前の書き込みが終わったか確かめています。確かめられるまで、書き込みは断ります'));
+  if (!d.state_ok) box.appendChild(node('div', 'sitMeta bad', '状態のファイルを読めないので、書き込みは断ります'));
+  if (d.problem) box.appendChild(node('div', 'sitMeta bad', '上限を読めません: ' + d.problem));
+  for (const t of ['user', 'memory']) {
+    const tt = d.targets[t], sec = node('div', 'memT'), h = node('h4', null, MEM_T[t]);
+    h.appendChild(node('span', 'use', tt.limit ? `${tt.chars} / ${tt.limit} 字` : `${tt.chars} 字`));
+    sec.appendChild(h);
+    if (tt.status === 'unreadable') sec.appendChild(node('div', 'sitMeta bad', 'このファイルは読めません（symlink・大きすぎる・壊れた文字など）。画面では変えません'));
+    if (tt.enabled === false) sec.appendChild(node('div', 'sitMeta', 'この記憶は Hermes の設定で切ってあります'));
+    for (const e of tt.entries) sec.appendChild(memCard(t, e, tt.status === 'ok'));
+    if (!tt.entries.length && tt.status !== 'unreadable') sec.appendChild(node('div', 'sitMeta', '（まだありません）'));
+    box.appendChild(sec);
+  }
+  box.appendChild(memAddForm());
+}
+async function memWrite(op, body, okText, onOk = () => {}) {
+  let r; try { r = await postJSON('/api/hermes/memory/' + op, body); } catch { r = { ok: false, reason: 'unknown', why: '本体から答えが届きませんでした' }; }
+  if (r.ok) onOk();  // 描き直す前に（足す欄を空にするなど）
+  memNote = r.ok ? [okText + '。ハブの前提には、次に会話が新しくなったときから入ります' + (r.shape ? `（書いたあとの確かめ: ${r.shape}）` : ''), !!r.shape]
+    : [(MEM_FAIL[r.reason] || `書けませんでした: ${r.reason}`) + (r.why ? `（${r.why}）` : ''), true];
+  memHold = false; await loadMemory();
+  return r;
+}
+function memCard(t, e, editable) {
+  const c = node('div', 'mem'), text = node('div', 'text', e.text);
+  c.appendChild(text);
+  if (!editable) return c;
+  const acts = node('div', 'acts'), ed = node('button', null, '直す'), rm = node('button', null, '消す');
+  let timer = null;
+  const resetRm = () => { clearTimeout(timer); memHold = false; rm.className = ''; rm.textContent = '消す'; };
+  rm.onclick = async () => {
+    if (!rm.classList.contains('sure')) {  // 1段目: 確かめを出す。10 秒で戻る
+      memHold = true; rm.className = 'sure'; rm.textContent = 'この項目を消す'; timer = setTimeout(resetRm, 10000); return;
+    }
+    clearTimeout(timer); rm.disabled = ed.disabled = true; rm.textContent = '消しています…';
+    await memWrite('remove', { target: t, v: e.v }, '消しました');
+  };
+  ed.onclick = () => {  // その場で文の欄に替える（開いたときの版で直す）
+    memHold = true; acts.hidden = true; text.hidden = true;
+    const ta = node('textarea'); ta.value = e.text;
+    const row = node('div', 'acts'), save = node('button', null, '保存'), cancel = node('button', null, 'やめる');
+    cancel.onclick = () => { memHold = false; loadMemory(); };
+    save.onclick = async () => { save.disabled = cancel.disabled = true; save.textContent = '保存しています…'; await memWrite('edit', { target: t, v: e.v, content: ta.value }, '直しました'); };
+    row.append(save, cancel); c.append(ta, row); ta.focus();
+  };
+  acts.append(ed, rm); c.appendChild(acts);
+  return c;
+}
+function memAddForm() {
+  const f = node('div', 'memAdd'), sel = node('select'), ta = node('textarea'), b = node('button', null, '足す');
+  f.appendChild(node('div', 'sitMeta', '記憶を足す'));
+  for (const [k, v] of Object.entries(MEM_T)) { const o = node('option', null, v); o.value = k; sel.appendChild(o); }
+  sel.value = memDraft.target; sel.onchange = () => { memDraft.target = sel.value; };
+  ta.placeholder = '覚えてほしいこと（例: 録音の「山だ」は山田のこと）'; ta.value = memDraft.text;
+  ta.oninput = () => { memDraft.text = ta.value; };
+  ta.onfocus = () => { memHold = true; }; ta.onblur = () => { memHold = false; };
+  b.onclick = async () => {
+    if (!ta.value.trim()) return;
+    b.disabled = true; b.textContent = '足しています…';
+    await memWrite('add', { target: sel.value, content: ta.value }, '足しました', () => { memDraft.text = ''; });
+  };
+  const row = node('div', 'acts'); row.appendChild(b);
+  f.append(sel, ta, row);
+  return f;
+}
+WIDE.addEventListener('change', applyWide);
+applyWide();
 
 // ---------- 通信 ----------
 // 本体に届かない間は案内を出してつなぎ直し続け、届いたらページを読み込み直さずに、その場で一覧・声・会話を取り直す。

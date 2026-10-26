@@ -125,7 +125,7 @@ with sync_playwright() as pw:
 
     s.INTAKE = False
     b = pw.chromium.launch()
-    page = b.new_page()
+    page = b.new_page(viewport={"width": 390, "height": 844})  # 💡 のボタンはスマホの幅のもの（1100px 以上は 3 列の PC の形で、💡 の中身は右の列に常に出る）
     page.goto(BASE + "/")
     page.wait_for_function("document.getElementById('conn').classList.contains('on')")
     page.click("#sitBtn")

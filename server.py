@@ -28,7 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import wave
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import aclosing, asynccontextmanager, suppress
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -44,6 +44,7 @@ sys.path.insert(0, str(HERE / "scripts"))
 from origin_guard import SameOriginOnly  # noqa: E402  接続元の確かめ
 import intake  # noqa: E402  拾う役（いまの状況を作る claude -p）
 import hermes_skills  # noqa: E402  Hermes の手順の書き足しを画面で採る・捨てる、Hermes の記憶を読む
+import hermes_memory  # noqa: E402  Hermes の記憶を画面（PC の「記憶」）で足す・直す・消す
 import consent  # noqa: E402  利用者の発言が、許す・選ぶの答えになっているか（承認に答える・閉じるの守り）
 
 PLUGIN_ID = "u-space.voice-loop"  # herdr-plugin.toml の id と同じ
@@ -3419,6 +3420,139 @@ async def api_hermes_skill_reject(body: dict):
         if res == "rejected":
             return JSONResponse({"ok": True, "discarded": out.get("discarded") is True})
         return JSONResponse({"ok": False, "reason": res if res in ("changed", "timeout") else "broken", "why": why[:200]})
+
+
+# ---------- Hermes の記憶（PC の画面の「記憶」で足す・直す・消す） ----------
+# 読むのはホストの側の安全な読み（hermes_memory.read_targets）。書くのはコンテナの中の固定の台本で、Hermes 自身の apply_memory_pending。
+# 画面だけの口（コンテナに開く口の一覧 DOCKER_ALLOWED に無い）。直す・消すは、画面に出した項目（版 → target と本文）を引き直して当てる。
+# 当たったか分からない（error・failed・timeout）ときは「終わり未確認」の印を残し、前の台本がもう動いていないと確かめるまで次を断る（PR #19 と同じ）
+HMEM_FILE = STATE_DIR / "hermes-memory" / "state.json"
+HMEM_LOCK = asyncio.Lock()  # 足す・直す・消すは一度にひとつ
+HMEM_SHOWN: OrderedDict[str, tuple[str, str]] = OrderedDict()  # 版 → (target, 本文)。画面に出した項目
+HMEM_SHOWN_MAX = 500
+HMEM_LIMITS = {"at": 0.0, "value": None, "why": ""}  # 上限と有効（画面の表示だけに使う。書く判定は Hermes の Store がその場で行う）
+HMEM_DONE = ("applied", "changed", "refused", "invalid")  # 決着した結果（書いていない・書いた、が分かる）
+
+
+def hmem_state() -> dict | None:
+    """状態のファイル。無ければ空。あるのに読めない・形が違うときは None（書くのを断る）。"""
+    try:
+        d = json.loads(HMEM_FILE.read_text())
+    except FileNotFoundError:
+        return {"verify": False}
+    except (OSError, ValueError, RecursionError):
+        traceback.print_exc()
+        return None
+    return {"verify": d.get("verify") is True} if isinstance(d, dict) else None
+
+
+def _hmem_limits() -> dict | None:
+    """上限と有効（5 分覚える）。読めなければ None（理由は HMEM_LIMITS["why"]）。"""
+    if time.time() - HMEM_LIMITS["at"] < (300 if HMEM_LIMITS["value"] else 30):
+        return HMEM_LIMITS["value"]
+    out = hermes_memory.run_script(HERMES_CONTAINER, "limits", wait=60)
+    ok = out.get("result") == "limits"
+    HMEM_LIMITS.update(at=time.time(), value={k: v for k, v in out.items() if k != "result"} if ok else None, why="" if ok else out.get("why", out.get("result", "")))
+    return HMEM_LIMITS["value"]
+
+
+def _hmem_view() -> dict:
+    targets = hermes_memory.read_targets(HERMES_HOME)
+    limits = _hmem_limits()
+    st = hmem_state()
+    out = {}
+    for t, d in targets.items():
+        rows = []
+        for e in d["entries"]:
+            v = hermes_memory.version(t, e)
+            HMEM_SHOWN[v] = (t, e)
+            HMEM_SHOWN.move_to_end(v)
+            rows.append({"v": v, "text": e})
+        lim = limits and limits.get("user_char_limit" if t == "user" else "memory_char_limit")
+        on = limits and limits.get("user_profile_enabled" if t == "user" else "memory_enabled")
+        out[t] = {"status": d["status"], "entries": rows, "chars": len(hermes_memory.DELIM.join(d["entries"])), "limit": lim, "enabled": on}
+    while len(HMEM_SHOWN) > HMEM_SHOWN_MAX:
+        HMEM_SHOWN.popitem(last=False)
+    return {"on": True, "targets": out, "verify": bool(st and st["verify"]), "state_ok": st is not None,
+            "problem": "" if limits else (HMEM_LIMITS["why"] or "上限を読めません")}
+
+
+@app.get("/api/hermes/memory")
+async def api_hermes_memory():
+    """PC の画面の「記憶」。Hermes の記憶の項目（ユーザーについて・メモ）と、字数・上限・有効。"""
+    if not hsk_on():
+        return JSONResponse({"on": False})
+    return JSONResponse(await asyncio.to_thread(_hmem_view))
+
+
+def _hmem_mark(verify: bool) -> bool:
+    try:
+        write_json(HMEM_FILE, {"verify": verify, "at": time.time()})
+        return True
+    except OSError:
+        traceback.print_exc()
+        return False
+
+
+async def _hmem_write(op: str, body: dict) -> JSONResponse:
+    if not hsk_on():
+        return JSONResponse({"ok": False, "reason": "off"})
+    target = body.get("target")
+    if target not in hermes_memory.TARGETS:
+        return JSONResponse({"ok": False, "reason": "bad_request"}, status_code=400)
+    req = {"target": target}
+    if op in ("add", "edit"):
+        why = hermes_memory.text_problem(body.get("content"))
+        if why:
+            return JSONResponse({"ok": False, "reason": "invalid", "why": why})
+        req["content"] = body["content"]
+    if op in ("edit", "remove"):
+        shown = HMEM_SHOWN.get(str(body.get("v", "")))
+        if not shown or shown[0] != target:
+            return JSONResponse({"ok": False, "reason": "stale"})
+        req["entry"] = shown[1]
+    async with HMEM_LOCK:
+        st = await asyncio.to_thread(hmem_state)
+        if st is None:
+            return JSONResponse({"ok": False, "reason": "state"})
+        if st["verify"]:
+            running = await asyncio.to_thread(hermes_memory.still_running, HERMES_CONTAINER)
+            if running is True:
+                return JSONResponse({"ok": False, "reason": "busy"})
+            if running is None:
+                return JSONResponse({"ok": False, "reason": "unverifiable"})
+            if not await asyncio.to_thread(_hmem_mark, False):
+                return JSONResponse({"ok": False, "reason": "state"})
+        if not await asyncio.to_thread(_hmem_mark, True):  # 台本の前に「終わり未確認」を書く（書けなければ動かさない）
+            return JSONResponse({"ok": False, "reason": "state"})
+        out = await asyncio.to_thread(hermes_memory.run_script, HERMES_CONTAINER, op, req)
+        res = out.get("result")
+        if res in HMEM_DONE:
+            await asyncio.to_thread(_hmem_mark, False)
+    hlog(f"Hermes の記憶: {op} {target} → {res}" + (f"（{_clip(str(out.get('why', '')), 80)}）" if out.get("why") else ""), flush=True)
+    if res == "applied":
+        return JSONResponse({"ok": True, "shape": out.get("shape", "")})
+    if res in HMEM_DONE:
+        return JSONResponse({"ok": False, "reason": res, "why": out.get("why", "")})
+    return JSONResponse({"ok": False, "reason": "unknown", "why": out.get("why", "")})
+
+
+@app.post("/api/hermes/memory/add")
+async def api_hermes_memory_add(body: dict):
+    """画面の「足す」。target（user・memory）に content を 1 項目として足す。"""
+    return await _hmem_write("add", body)
+
+
+@app.post("/api/hermes/memory/edit")
+async def api_hermes_memory_edit(body: dict):
+    """画面の「直す」。画面に出した版 v の項目を、content に置き換える（項目全体）。"""
+    return await _hmem_write("edit", body)
+
+
+@app.post("/api/hermes/memory/remove")
+async def api_hermes_memory_remove(body: dict):
+    """画面の「消す」（2 段）。画面に出した版 v の項目を消す。"""
+    return await _hmem_write("remove", body)
 
 
 def _hsk_tidy(ids: set[str]) -> list[str]:
