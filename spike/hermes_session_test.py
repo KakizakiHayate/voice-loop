@@ -92,6 +92,28 @@ s.HERMES_SESSION_FILE.unlink()
 restart()
 s.HERMES_RESET_HOUR = hour
 
+# 状態を読めず書けもしない間は、仮の印で続け（ハブを止めない）、その間は「新しくする」を断る。直ってから起動し直すと、
+# 保存されている会話（利用者が最後に選んだ会話）に戻る。利用者が捨てた会話（新しくする前の会話・前の日の会話）へは戻らない
+f = s.HERMES_SESSION_FILE
+before_reset = name("2026-10-26 12:00")
+chosen = s.hermes_session_new(at("2026-10-26 12:00"))  # 利用者が新しくした（before_reset は捨てた会話）
+restart()
+f.chmod(0)
+f.parent.chmod(0o500)
+try:
+    temp = name("2026-10-26 12:00")
+    refused = c.post("/api/hermes/session/new").json()
+    still = name("2026-10-26 13:00")
+finally:
+    f.parent.chmod(0o700)
+    f.chmod(0o600)
+restart()
+check("読めず書けない間は仮の会話で続け、「新しくする」は断る。直って起動し直すと、最後に選んだ会話に戻り、捨てた会話には戻らない",
+      (temp not in (before_reset, chosen), refused, still == temp, name("2026-10-26 14:00"), name("2026-10-26 14:00") == before_reset),
+      (True, {"ok": False, "reason": "state"}, True, chosen, False))
+f.unlink()
+restart()
+
 # 一覧の読み出し（別のスレッド）が古い印を読んだところで止まり、そのあいだに「新しくする」が済んでも、古い印で上書きしない
 import threading  # noqa: E402
 

@@ -681,7 +681,9 @@ def _session_token(day: str) -> str:
             try:
                 write_json(HERMES_SESSION_FILE, {"day": day, "token": tok})
             except OSError:
-                traceback.print_exc()  # 書けなくても、動いている間はこの印で続ける（再起動したら、また新しい会話になる）
+                # 書けなくても、動いている間はこの印で続ける（ハブを止めない）。この間に利用者が会話を捨てることはない（「新しくする」は
+                # 書けなければ断る）。直ってから起動し直すと、保存されている会話（利用者が最後に選んだ会話）に戻る
+                traceback.print_exc()
         _session_mem.update(day=day, token=tok)
         return tok
 
