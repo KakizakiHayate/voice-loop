@@ -105,6 +105,10 @@
   .prop .acts button { border:none; border-radius:8px; background:#3a3420; color:var(--fg); font-size:13px; padding:6px 12px; }
   .prop .acts button.go { background:#6b5a2a; }
   .prop .acts button.sure { background:#b8862e; color:#111; font-weight:600; }
+  /* Hermes の手順の書き足し（承認待ち）。提案と見分けるため色を変える */
+  .prop.hsk { border-color:#4d5a80; background:#161b29; }
+  .prop.hsk .go { background:#4d5a80; }
+  pre.diff { margin:4px 0 0; max-height:40dvh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:11px; line-height:1.45; color:#cfd6e6; background:#0f121b; border-radius:6px; padding:6px 8px; }
   #sitNote { font-size:12px; color:#d8c88f; overflow-wrap:anywhere; }
   #sitNote.bad { color:#e07a74; }
   #situation details summary { font-size:12px; color:#c9b77a; cursor:pointer; }
@@ -503,6 +507,67 @@ const PROP_FAIL = {
   stale: 'セッションは立てましたが、そのあいだに話題の中身が変わったので、指示は送っていません',
   unknown: '送れたか分かりません。📋 やセッションの様子を見てください',
 };
+// Hermes の手順の書き足し（承認待ち）: 「採る」は2段。採ると、コンテナの中で Hermes 自身の承認の処理（/skills approve と同じ）が動く。
+// 差分は開いたときに取る。開いていたものは、描き直しても開いたまま（差分は版ごとに覚えておく）
+const HSK_FAIL = {
+  stale: '画面が古くなっていました。読み直しました', changed: '承認待ちの記録が変わっていました。読み直しました',
+  unsupported: 'この形は画面では扱えません（Hermes の対話画面の /skills で）', applying: 'この書き足しは当てている途中です',
+  applied: 'この書き足しはもう当てました。二度は当てません',
+  unknown: '当たったか分かりません。手順のファイルか Hermes の対話画面で確かめてください。この書き足しはもう採れません（捨てるはできます）',
+  busy: '前の処理が終わるのを待っています', broken: 'Hermes の書き足しを扱えません', state: '状態を書けないので、当てていません',
+  timeout: '時間切れになりました。前の処理が終わったと確かめられるまで、採る・捨てるは断ります', off: 'Hermes がハブでないか、置き場がありません',
+};
+const hskOpen = new Set(), hskDiff = new Map();
+function hskCard(it) {
+  const c = node('div', 'prop hsk');
+  c.appendChild(node('div', 'text', it.summary || '（要約なし）'));
+  c.appendChild(node('div', 'sitMeta', (it.at ? stamp(it.at) + '・' : '') + (it.origin === 'background_review' ? '会話のあとの見直しから' : '会話の中から')));
+  if (it.unsupported) c.appendChild(node('div', 'risky', `この形は画面では扱えません（${it.unsupported}）。Hermes の対話画面の /skills で`));
+  if (it.note) c.appendChild(node('div', 'risky', it.note));
+  const det = document.createElement('details');
+  det.appendChild(node('summary', null, '差分を見る'));
+  const pre = node('pre', 'diff');
+  det.appendChild(pre);
+  det.ontoggle = async () => {
+    if (!det.open) { hskOpen.delete(it.v); return; }
+    hskOpen.add(it.v);
+    if (hskDiff.has(it.v)) { pre.textContent = hskDiff.get(it.v); return; }
+    pre.textContent = '読んでいます…';
+    let r; try { r = await postJSON('/api/hermes/skills/diff', { id: it.id, v: it.v }); } catch { r = { ok: false, reason: '本体に届きません' }; }
+    if (r.ok) hskDiff.set(it.v, r.diff);
+    pre.textContent = r.ok ? r.diff : '差分を読めませんでした: ' + (HSK_FAIL[r.reason] || r.reason) + (r.why ? `（${r.why}）` : '');
+  };
+  if (hskOpen.has(it.v)) det.open = true;
+  c.appendChild(det);
+  const acts = node('div', 'acts');
+  const no = node('button', null, '捨てる');
+  if (it.can_apply) {
+    const go = node('button', 'go', '採る');
+    let timer = null;
+    const reset = () => { clearTimeout(timer); sitHold = false; go.className = 'go'; go.textContent = '採る'; };
+    go.onclick = async () => {
+      if (!go.classList.contains('sure')) {  // 1段目: 確かめを出す。10 秒で戻る
+        sitHold = true; go.className = 'sure'; go.textContent = 'Hermes の手順に書き足す';
+        timer = setTimeout(reset, 10000); return;
+      }
+      clearTimeout(timer); go.disabled = no.disabled = true; go.textContent = '書き足しています…';
+      let r; try { r = await postJSON('/api/hermes/skills/approve', { id: it.id, v: it.v }); } catch { r = { ok: false, reason: 'unknown', why: '本体から答えが届きませんでした' }; }
+      sitNote = r.ok ? ['手順に書き足しました。次からの会話で使われます' + (r.discarded ? '' : '（承認待ちの記録は消せませんでした。捨てるで消せます）'), false]
+        : ['書き足しを採れませんでした: ' + (HSK_FAIL[r.reason] || r.reason) + (r.why ? `（${r.why}）` : ''), true];
+      sys(sitNote[0]); sitHold = false; loadSituation();
+    };
+    acts.appendChild(go);
+  }
+  no.onclick = async () => {
+    no.disabled = true; sitHold = true;
+    let r; try { r = await postJSON('/api/hermes/skills/reject', { id: it.id, v: it.v }); } catch { r = { ok: false, reason: '本体から答えが届きませんでした。捨てられたか分かりません' }; }
+    sitNote = r.ok ? ['書き足しを捨てました' + (r.discarded ? '' : '（承認待ちの記録は消せませんでした）'), !r.discarded]
+      : ['捨てられませんでした: ' + (HSK_FAIL[r.reason] || r.reason) + (r.why ? `（${r.why}）` : ''), true];
+    sys(sitNote[0]); sitHold = false; loadSituation();
+  };
+  acts.appendChild(no); c.appendChild(acts);
+  return c;
+}
 function proposalCard(p) {
   const c = node('div', 'prop');
   const left = Math.max(1, Math.ceil((p.expires * 1000 - Date.now()) / 3600000));
@@ -537,7 +602,10 @@ function proposalCard(p) {
 }
 async function loadSituation() {
   const box = $('sitBody');
-  let d; try { d = await (await fetch('/api/situation')).json(); } catch { box.textContent = '読めませんでした（接続を確かめてください）'; return; }
+  let d, h;
+  try {
+    [d, h] = await Promise.all([fetch('/api/situation').then(r => r.json()), fetch('/api/hermes/skills').then(r => r.json()).catch(() => null)]);
+  } catch { box.textContent = '読めませんでした（接続を確かめてください）'; return; }
   if (sitHold) return;  // 読んでいるあいだに「送る」が押された
   box.innerHTML = '';
   const head = node('div', 'sitHead');
@@ -555,6 +623,14 @@ async function loadSituation() {
   }
   box.appendChild(head);
   if (sitNote) { const n = node('div', sitNote[1] ? 'bad' : null, sitNote[0]); n.id = 'sitNote'; box.appendChild(n); }
+  if (h && h.on && (h.items.length || h.unreadable || h.problem)) {
+    box.appendChild(node('h4', null, `ハブが手順に書き足したいこと（Hermes・${h.items.length}）— 採ると Hermes の手順に入り、次からの会話で使われます`));
+    if (h.problem) box.appendChild(node('div', 'sitMeta bad', h.problem));
+    if (h.verify) box.appendChild(node('div', 'sitMeta bad', '前の処理が終わったか確かめています。確かめられるまで、採る・捨てるは断ります'));
+    if (h.unreadable) box.appendChild(node('div', 'sitMeta bad', `読めない記録 ${h.unreadable} 件（symlink・大きすぎるもの・形の違うものは読みません。Hermes の対話画面の /skills で見てください）`));
+    for (const it of h.items) box.appendChild(hskCard(it));
+    if (h.items.length) box.appendChild(node('div', 'sitMeta', '似た書き足しがもう手順にあれば、捨ててかまいません'));
+  }
   if (d.proposals.length) {
     box.appendChild(node('h4', null, `提案（${d.proposals.length}）— 送ると、そのフォルダに新しいセッションを立てて頼みます。放っておけば消えます`));
     for (const p of d.proposals) box.appendChild(proposalCard(p));
