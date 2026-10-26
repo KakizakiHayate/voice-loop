@@ -74,13 +74,14 @@ def affirms(text: str, action: str, project: str = "") -> bool:
 
 
 def chooses(text: str, n: int, options: dict, project: str = "") -> bool:
-    """発言全体が、選択肢 n を選ぶ答えか。選びうる選択肢（選ぶ節の番号と、文言が合う選択肢）がちょうど {n} のときだけ。"""
+    """発言全体が、選択肢 n を選ぶ答えか。選びうる選択肢（選ぶ節の番号と、文言が合う選択肢）がちょうど {n} のときだけ。
+    選ぶ発言では、プロジェクト名を前置きとして読まない（数字のプロジェクト名「2」で「22番」を「2＋2番」と読まないため）。"""
     if refuses(text):
         return False
-    pre, tail, pick = _pre(project), f"(?:{_alt(TAIL)})*", f"(?:{_alt(PICK)})?"
+    pre, tail, pick = _pre(""), f"(?:{_alt(TAIL)})*", f"(?:{_alt(PICK)})?"
     by_number = re.compile(f"{pre}(?P<n>[0-9]+|[〇一二三四五六七八九])番?目?{pick}{tail}")
     by_label = {k: re.compile(f"{pre}{re.escape(lab)}{pick}{tail}") for k, v in options.items() if len(lab := _flat(str(v))) >= 2}
-    plain = _yes_clause(None, project)
+    plain = _yes_clause(None, "")
     picked: set[int] = set()
     cs = clauses(text)
     for c in cs:

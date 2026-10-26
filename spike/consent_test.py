@@ -51,6 +51,9 @@ check("選ぶ: 2 番を選ぶ例", [t for t in PICK2 if not c.chooses(t, 2, OPTS
 check("選ぶ: どの番号も選ばない例", [(t, n) for t in NOPICK for n in (1, 2, 3) if c.chooses(t, n, OPTS, "proj")], [])
 check("選ぶ: 番号と文言が別の選択肢を指すときは選ばない（一つに決まらない）",
       (c.chooses("1番で", 1, {1: "高速", 2: "1番"}), c.chooses("1番で", 2, {1: "高速", 2: "1番"}), c.chooses("高速で", 1, {1: "高速", 2: "1番"})), (False, False, True))
+check("選ぶ: 数字のプロジェクト名でも、番号を取り違えない（「22番」を「2＋2番」と読まない。a2a 実装 1 回目の再現）",
+      (c.chooses("22番", 2, {2: "低速", 22: "高速"}, "2"), c.chooses("22番", 22, {2: "低速", 22: "高速"}, "2"), c.chooses("22番", 2, {1: "a1", 2: "b2"}, "2")), (False, True, False))
+check("選ぶ: 選択肢に無い番号を言ったら、どの番号も選ばない", [k for k in (1, 2, 3) if c.chooses("5番で", k, OPTS, "proj")], [])
 check("選ぶ: 一字の文言では選ばない（取り違えやすい）", c.chooses("Aで", 1, {1: "A", 2: "B"}), False)
 ASKS = {"proj の「テスト」が、ls の実行の許可を求めています。許可しますか？": True, "proj で、本当に消していいですか": True,
         "**PROJ** の「テスト」を閉じていいですか**": True, "proj の資料です。": False, "許可しますか？": False, "": False}
