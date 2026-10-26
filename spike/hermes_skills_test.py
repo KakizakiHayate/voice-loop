@@ -249,13 +249,13 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     post("/api/hermes/skills/diff", id="aaaaaaaa", v=va)
     check("差分: 画面に出した中身で台本を呼ぶ・版ごとに覚える", (r, [(m, p, raw == raw_a) for m, p, raw in modes("diff")]),
           ({"ok": True, "diff": "差分 aaaaaaaa"}, [("diff", "aaaaaaaa", True)]))
-    check("差分: 画面の版が違えば読まない", post("/api/hermes/skills/diff", id="aaaaaaaa", v="0" * 16)["reason"], "stale")
+    check("差分: 画面の版が違えば読まない", post("/api/hermes/skills/diff", id="aaaaaaaa", v="0" * 16).get("reason"), "stale")
     check("id の形が違えば 400", c.post("/api/hermes/skills/approve", json={"id": "../x", "v": va}).status_code, 400)
 
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v="0" * 16)
-    check("採る: 画面の版が控えと違えば断り、台本を呼ばない", (r["reason"], modes("approve")), ("stale", []))
+    check("採る: 画面の版が控えと違えば断り、台本を呼ばない", (r.get("reason"), modes("approve")), ("stale", []))
     r = post("/api/hermes/skills/approve", id="bbbbbbbb", v=items["bbbbbbbb"]["v"])
-    check("採る: 扱えない形は断り、台本を呼ばない", (r["reason"], modes("approve")), ("unsupported", []))
+    check("採る: 扱えない形は断り、台本を呼ばない", (r.get("reason"), modes("approve")), ("unsupported", []))
 
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
     st = s.hsk_state()["items"]["aaaaaaaa"]
@@ -268,7 +268,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
           ("applied", "0o600", True, ("approve", "applied")))
     check("操作の記録に記録の中身（差分の文）は書かない", "new_string" in s.HSK_LOG.read_text(), False)
     n = len(modes("approve"))
-    check("採る: 当てた id は二度採れない（記録が残っていても）", (post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)["reason"], len(modes("approve"))), ("applied", n))
+    check("採る: 当てた id は二度採れない（記録が残っていても）", (post("/api/hermes/skills/approve", id="aaaaaaaa", v=va).get("reason"), len(modes("approve"))), ("applied", n))
 
     reset()
     record("aaaaaaaa", PATCH)
@@ -288,8 +288,8 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         va = view()["items"][0]["v"]
         r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
         check(f"台本が {res}: 当てていないので承認待ちに戻る（印も控えも残さない）",
-              (r["reason"], s.hsk_state()["items"].get("aaaaaaaa"), (s.HSK_DIR / "approved" / "aaaaaaaa.json").exists()), (res, want_state, False))
-    check("…当てていないと分かったあとは、画面の取り直しが要る（同じ版では押せない）", post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)["reason"], "stale")
+              (r.get("reason"), s.hsk_state()["items"].get("aaaaaaaa"), (s.HSK_DIR / "approved" / "aaaaaaaa.json").exists()), (res, want_state, False))
+    check("…当てていないと分かったあとは、画面の取り直しが要る（同じ版では押せない）", post("/api/hermes/skills/approve", id="aaaaaaaa", v=va).get("reason"), "stale")
 
     for res in ({"result": "failed", "why": "patch would fail"}, {"result": "error", "why": "ImportError"}, lambda: 1 / 0):
         reset()
@@ -300,9 +300,9 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         it = view()["items"][0]
         name = res["result"] if isinstance(res, dict) else "本体の例外"
         check(f"台本が {name}: 当たったか分からない。もう採れない（捨てるは出す）",
-              (r["reason"], it["state"], it["can_apply"], "当たったか分かりません" in it["note"]), ("unknown", "unknown", False, True))
+              (r.get("reason"), it["state"], it["can_apply"], "当たったか分かりません" in it["note"]), ("unknown", "unknown", False, True))
         n = len(modes("approve"))
-        check(f"…{name} の id は二度採らない", (post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)["reason"], len(modes("approve"))), ("unknown", n))
+        check(f"…{name} の id は二度採らない", (post("/api/hermes/skills/approve", id="aaaaaaaa", v=va).get("reason"), len(modes("approve"))), ("unknown", n))
     r = post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)
     check("分からない id も捨てられ、捨てても分からない印は残る", (r["ok"], s.hsk_state()["items"]["aaaaaaaa"]["state"]), (True, "unknown"))
 
@@ -313,7 +313,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     v = view()
     vs = {i["id"]: i["v"] for i in v["items"]}
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=vs["aaaaaaaa"])
-    check("時間切れ: 分からない・前の処理の終わりを確かめるまで断る印", (r["reason"], s.hsk_state()["items"]["aaaaaaaa"]["state"], s.hsk_state()["verify"], view()["verify"]),
+    check("時間切れ: 分からない・前の処理の終わりを確かめるまで断る印", (r.get("reason"), s.hsk_state()["items"]["aaaaaaaa"]["state"], s.hsk_state()["verify"], view()["verify"]),
           ("unknown", "unknown", True, True))
     OUT["approve"] = {"result": "applied", "discarded": True}
     n = len(modes("approve"))
@@ -323,7 +323,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     RUNNING["v"] = None
     r3 = post("/api/hermes/skills/approve", id="bbbbbbbb", v=vs["bbbbbbbb"])
     check("…台本がまだ動いている・確かめられない間は、採る・捨てるを断る（時間だけでは解かない）",
-          (r1["reason"], "まだ動いて" in r1["why"], r2["reason"], r3["reason"], "確かめられません" in r3["why"], len(modes("approve")), len(modes("reject"))),
+          (r1.get("reason"), "まだ動いて" in r1.get("why", ""), r2.get("reason"), r3.get("reason"), "確かめられません" in r3.get("why", ""), len(modes("approve")), len(modes("reject"))),
           ("busy", True, "busy", "busy", True, n, 0))
     RUNNING["v"] = False
     r = post("/api/hermes/skills/approve", id="bbbbbbbb", v=vs["bbbbbbbb"])
@@ -335,7 +335,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     v = view()
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=v["items"][0]["v"])
     check("コンテナが使えない: 欄に理由を出し、採るを出さない", (v["problem"].startswith("Hermes のコンテナ（hermes-test）で台本を動かせません"), v["items"][0]["can_apply"]), (True, False))
-    check("…押されても当てず、分からないにもしない", (r["reason"], modes("approve"), s.hsk_state()["items"].get("aaaaaaaa")), ("broken", [], None))
+    check("…押されても当てず、分からないにもしない", (r.get("reason"), modes("approve"), s.hsk_state()["items"].get("aaaaaaaa")), ("broken", [], None))
 
     reset()
     record("aaaaaaaa", PATCH)
@@ -343,7 +343,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     s._probes.pop("hermes-skills", None)
     OUT["check"] = {"result": "error", "why": "AttributeError: apply_skill_pending"}
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
-    check("一覧のあとにコンテナが変わっても、当てる直前に確かめ直す", (r["reason"], modes("approve")), ("broken", []))
+    check("一覧のあとにコンテナが変わっても、当てる直前に確かめ直す", (r.get("reason"), modes("approve")), ("broken", []))
 
     reset()
     record("aaaaaaaa", PATCH)
@@ -354,7 +354,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
         r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
     finally:
         s.HSK_DIR.chmod(0o700)
-    check("状態を書けなければ当てない", (r["reason"], modes("approve")), ("state", []))
+    check("状態を書けなければ当てない", (r.get("reason"), modes("approve")), ("state", []))
 
     reset()
     record("aaaaaaaa", PATCH)
@@ -362,7 +362,7 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     s.HSK_FILE.write_text("{壊れた")
     r = post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
     v = view()
-    check("状態のファイルが読めなければ、採る・捨てるを断り、欄に出す", (r["reason"], modes("approve"), v["items"][0]["can_apply"], "読めません" in v["problem"]),
+    check("状態のファイルが読めなければ、採る・捨てるを断り、欄に出す", (r.get("reason"), modes("approve"), v["items"][0]["can_apply"], "読めません" in v["problem"]),
           ("busy", [], False, True))
 
     reset()
@@ -383,13 +383,13 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     r = post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)
     check("捨てる: 控えの中身を台本に渡し、捨てた印を残す", (r, modes("reject")[0][2] == (PEND / "aaaaaaaa.json").read_bytes(), s.hsk_state()["items"]["aaaaaaaa"]["state"]),
           ({"ok": True, "discarded": True}, True, "rejected"))
-    check("…同じ画面の版で二度は捨てない（画面の取り直しが要る）", post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)["reason"], "stale")
+    check("…同じ画面の版で二度は捨てない（画面の取り直しが要る）", post("/api/hermes/skills/reject", id="aaaaaaaa", v=va).get("reason"), "stale")
     reset()
     record("aaaaaaaa", PATCH)
     va = view()["items"][0]["v"]
     OUT["reject"] = {"result": "timeout", "why": "x"}
     r = post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)
-    check("捨てるの時間切れでも、前の処理の終わりを確かめるまで断る", (r["reason"], s.hsk_state()["verify"]), ("timeout", True))
+    check("捨てるの時間切れでも、前の処理の終わりを確かめるまで断る", (r.get("reason"), s.hsk_state()["verify"]), ("timeout", True))
 
     reset()
     s.write_json(s.HSK_FILE, {"items": {"aaaaaaaa": {"state": "applying", "at": time.time(), "summary": "x"}}, "told": {}})
