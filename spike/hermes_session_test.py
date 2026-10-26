@@ -31,22 +31,62 @@ def check(name, got, want):
 c = TestClient(s.app, base_url="http://127.0.0.1:8790")
 at = lambda text: datetime.strptime(text, "%Y-%m-%d %H:%M")
 
-# ---------- 会話の名前（毎朝4時に変わる・画面で新しくする） ----------
-check("4時より前は前の日の会話", (s.hermes_session(at("2026-10-26 03:59")), s.hermes_session(at("2026-10-26 04:00"))), ("hub-20261025", "hub-20261026"))
-check("新しくするたびに、その日の回数が進む",
-      (s.hermes_session_new(at("2026-10-26 10:00")), s.hermes_session_new(at("2026-10-26 11:00")), s.hermes_session(at("2026-10-26 12:00"))),
-      ("hub-20261026-1", "hub-20261026-2", "hub-20261026-2"))
-check("次の日の4時には、回数を持ち越さずに新しい会話", (s.hermes_session(at("2026-10-27 03:59")), s.hermes_session(at("2026-10-27 04:00"))),
-      ("hub-20261026-2", "hub-20261027"))
-for bad in ('{"day": "20261026", "n": true}', '{"day": "20261026", "n": -3}', '{"day": "20261026", "n": "2"}', "[1, 2]", "壊れた"):
+# ---------- 会話の名前（毎朝4時に変わる・画面で新しくする。会話ごとに乱数の印で、前に使った名前へは戻らない） ----------
+import re  # noqa: E402
+
+
+def restart():
+    """本体を起動し直したことにする（覚えている印を忘れる。状態のファイルは残る）。"""
+    s._session_mem.clear()
+
+
+name = lambda t: s.hermes_session(at(t))
+shape = lambda n, day: bool(re.fullmatch(f"hub-{day}-[0-9a-f]{{6}}", n))
+a1, a2 = name("2026-10-26 03:59"), name("2026-10-26 04:00")
+check("4時より前は前の日の会話、4時からはその日の会話（名前は 元-日付-印）", (shape(a1, "20261025"), shape(a2, "20261026"), a1 != a2), (True, True, True))
+check("同じ日のうちは同じ名前で続く", name("2026-10-26 23:59"), a2)
+restart()
+check("本体を起動し直しても、状態のファイルがあれば同じ会話で続ける", name("2026-10-26 12:00"), a2)
+used = {a1, a2}
+b1 = s.hermes_session_new(at("2026-10-26 10:00"))
+b2 = s.hermes_session_new(at("2026-10-26 11:00"))
+check("新しくするたびに、前に使っていない名前になる", (shape(b1, "20261026"), shape(b2, "20261026"), len(used | {b1, b2})), (True, True, 4))
+used |= {b1, b2}
+check("新しくしたあとは、その名前で続く（起動し直しても）", (name("2026-10-26 12:00"), (restart(), name("2026-10-26 12:00"))[1]), (b2, b2))
+for bad in ('{"day": "20261026", "token": "zzzzzz"}', '{"day": "20261026", "n": 2}', '{"day": "20261026", "token": ""}', "[1, 2]", "壊れた"):
     s.HERMES_SESSION_FILE.write_text(bad)
-    check(f"状態のファイルが壊れていても、その日の最初の会話の名前で続ける（{bad}）", s.hermes_session(at("2026-10-26 12:00")), "hub-20261026")
+    restart()
+    n = name("2026-10-26 12:00")
+    check(f"状態のファイルが壊れていたら、前に使った名前へ戻らず新しい会話にする（{bad}）", (shape(n, "20261026"), n in used), (True, False))
+    used.add(n)
 s.HERMES_SESSION_FILE.unlink()
+restart()
+n = name("2026-10-26 12:00")
+check("状態のファイルが消えても、前に使った名前（その日の最初の会話も）へは戻らない", (shape(n, "20261026"), n in used), (True, False))
+used.add(n)
+c1 = name("2026-10-27 04:00")
+check("次の日の4時には、新しい印の会話", (shape(c1, "20261027"), c1 in used), (True, False))
+s.HERMES_SESSION_FILE.unlink()
+s.HERMES_SESSION_FILE.mkdir()
+restart()
+d1 = name("2026-10-28 04:00")
+check("状態を書けないときも、動いている間は同じ名前で続ける", (shape(d1, "20261028"), name("2026-10-28 09:00")), (True, d1))
+s.HERMES_SESSION_FILE.rmdir()
+restart()
 hour = s.HERMES_RESET_HOUR
 s.HERMES_RESET_HOUR = None
-check("日ごとに変えない設定（VL_HERMES_RESET_HOUR=off）なら、元の名前のまま", (s.hermes_session(at("2026-10-26 12:00")), s.hermes_session_new(at("2026-10-26 12:00"))), ("hub", "hub-1"))
+check("日ごとに変えない設定（VL_HERMES_RESET_HOUR=off）で状態がまだ無ければ、元の名前のまま（前の版から続ける）", name("2026-10-26 12:00"), "hub")
+e1 = s.hermes_session_new(at("2026-10-26 12:00"))
+restart()
+check("off でも新しくすると印が付き、日をまたいでも、起動し直しても続く", (bool(re.fullmatch("hub-[0-9a-f]{6}", e1)), name("2026-10-30 12:00")), (True, e1))
+s.HERMES_SESSION_FILE.write_text("壊れた")
+restart()
+check("off で状態が壊れていたら、元の名前（捨てた会話）へ戻らず新しい会話", name("2026-10-30 12:00") in ("hub", e1), False)
 s.HERMES_SESSION_FILE.unlink()
+restart()
 s.HERMES_RESET_HOUR = hour
+check("話し相手の一覧の Hermes の項目に、会話を新しくする時刻が出る（off なら空）",
+      (next(a for a in c.get("/api/agents").json() if a.get("hermes"))["reset_hour"],), (4,))
 
 # Hermes に送るときは、いまの会話の名前を付ける
 sent = []
@@ -76,12 +116,12 @@ s.ask_hermes("こんにちは")
 check("Hermes に送るときは、いまの会話の名前（元の名前＋日付）を付ける", sent[-1]["session"], s.hermes_session())
 r = c.post("/api/hermes/session/new").json()
 s.ask_hermes("もう一度")
-check("画面で新しくすると、次の発言から新しい会話の名前で送る", (r["ok"], sent[-1]["session"], r["session"].endswith("-1")), (True, r["session"], True))
+check("画面で新しくすると、次の発言から新しい会話の名前で送る", (r["ok"], sent[-1]["session"], r["session"] != sent[-2]["session"]), (True, r["session"], True))
 check("新しくしたことは、画面の履歴に知らせとして残る", s.hermes_history()[-1], {"role": "note", "text": "ハブの会話を新しくしました（Hermes の記憶と手順書は残ります）"})
 check("話し相手の一覧の Hermes の項目に、いまの会話の名前が出る", next(a for a in c.get("/api/agents").json() if a.get("hermes"))["session"], r["session"])
 s.HERMES_SESSION_FILE.unlink()
 s.HERMES_SESSION_FILE.mkdir()
-before = s.hermes_session()
+before = s.hermes_session()  # 覚えている印で続く
 check("状態を書けないときは新しくせず、そう返す", (c.post("/api/hermes/session/new").json(), s.hermes_session()), ({"ok": False, "reason": "state"}, before))
 s.HERMES_SESSION_FILE.rmdir()
 key = s.HERMES_KEY
@@ -116,7 +156,13 @@ check("指示には、件数・時刻・話題の本文が入らない", any(w i
 s.INTAKE = False
 for p in (s.SITUATION_FILE, s.FACTS_FILE):
     p.unlink()
-check("話題も覚えていることも無く、拾う役も切ってあれば、案内は足さない", s.hermes_messages("やあ"), [{"role": "system", "content": "ハブへの指示（試験）"}, {"role": "user", "content": "やあ"}])
+none = s.hermes_messages("やあ")
+check("話題も覚えていることも無く、拾う役も切ってあれば、発言の後ろの案内は足さない", none[-1], {"role": "user", "content": "やあ"})
+check("…そのときも、指示（system）は件数があるときと同じ（0件と1件の境で変わらない）", none[0] == second[0], True)
+s.write_json(s.FACTS_FILE, {"next": 2, "facts": [{"n": 1, "text": "はじめての覚えごと", "at": time.time(), "via": "screen"}]})
+one = s.hermes_messages("やあ")
+check("最初の1件を覚えても、指示（system）は変わらず、案内だけが付く", (one[0] == none[0], "覚えていること 1 件" in one[-1]["content"]), (True, True))
+s.FACTS_FILE.unlink()
 
 # ---------- sessions: 最終更新の時刻と、直近の依頼がどこから来たか ----------
 LOG = Path(TMP) / "w.jsonl"

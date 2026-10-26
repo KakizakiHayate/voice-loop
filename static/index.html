@@ -568,10 +568,11 @@ function hskCard(it) {
   acts.appendChild(no); c.appendChild(acts);
   return c;
 }
-// ハブ（Hermes）の会話を新しくする: 前の会話を持ち越さずに始め直す（毎朝4時にも新しくなる）。記憶と手順書は残り、直した記憶はここから効く。2段
+// ハブ（Hermes）の会話を新しくする: 前の会話を持ち越さずに始め直す（設定した時刻にも毎朝新しくなる。既定 4 時）。記憶と手順書は残り、直した記憶はここから効く。2段
 function hubSessionRow(a) {
   const row = node('div', 'sitHead');
-  row.appendChild(node('span', null, `ハブの会話: ${a.session}（毎朝4時に新しくなります）`));
+  const when = a.reset_hour == null ? '日ごとには変わりません' : `毎朝${a.reset_hour}時に新しくなります`;
+  row.appendChild(node('span', null, `ハブの会話: ${a.session}（${when}）`));
   const b = node('button', null, 'ハブの会話を新しくする');
   let timer = null;
   const reset = () => { clearTimeout(timer); sitHold = false; b.className = ''; b.textContent = 'ハブの会話を新しくする'; };
