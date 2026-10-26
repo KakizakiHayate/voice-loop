@@ -630,24 +630,32 @@ function drawTasksWide(list, rows) {
     list.appendChild(node('div', 'tgs', `${title}　${group.length}`));
     for (const t of group) {
       const [label, cls] = TASK_STATUS[t.status] || [t.status, ''];
-      const el = node('div', 'task' + (group === ended ? ' ended' : '') + (tasksOpen.has(t.id) ? ' open' : ''));
+      const el = node('div', 'task' + (group === ended ? ' ended' : '') + (tasksOpen.has(t.id) ? ' open' : '')); el.dataset.id = t.id;
       const lane = TASK_LANE[t.status] || (cls === 'bad' ? 'bad' : ''); if (lane) el.dataset.lane = lane;
       const tl = node('div', 'tl'); tl.append(node('span', 'st', label), node('span', 'tm', hm(t.since_minutes)));
       const nm = node('div', 'nm'); nm.append(node('span', 'pj', t.project), node('span', 'tt', '｜' + t.title));
       el.append(tl, nm, node('div', 'what', `${TASK_KIND[t.kind] || t.kind}${t.text ? '：' + t.text : ''}（${hm(t.age_minutes)}）`));
       if (t.note) el.appendChild(node('div', 'note', t.note));
       list.appendChild(el);
-      // 2 行からはみ出す件（と、開いている件）だけ押して開けるようにする。はみ出すかは文の長さでなく、描いたあとに測る（種別・時刻・列の幅で変わる）
-      requestAnimationFrame(() => {
-        const w = el.querySelector('.what');
-        if (!tasksOpen.has(t.id) && w.scrollHeight <= w.clientHeight + 2) return;
-        el.tabIndex = 0; el.setAttribute('role', 'button'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id)));
-        const flip = () => { tasksOpen.has(t.id) ? tasksOpen.delete(t.id) : tasksOpen.add(t.id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id))); };
-        el.onclick = flip; el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
-      });
     }
   }
+  requestAnimationFrame(armTasks);
 }
+// 2 行からはみ出す件（と、開いている件）だけ押して開けるようにする。はみ出すかは文の長さでなく、描いたあとと列の幅が変わったときに測る
+// （種別・時刻・列の幅で変わる。幅を変えたときに、次の取り直しを待たずに開けるように）
+function armTask(el) {
+  const id = el.dataset.id, w = el.querySelector('.what'), open = tasksOpen.has(id);
+  if (!open && w.scrollHeight <= w.clientHeight + 2) {
+    el.removeAttribute('tabindex'); el.removeAttribute('role'); el.removeAttribute('aria-expanded'); el.onclick = el.onkeydown = null; return;
+  }
+  if (el.getAttribute('role') === 'button') return;
+  el.tabIndex = 0; el.setAttribute('role', 'button'); el.setAttribute('aria-expanded', String(open));
+  const flip = () => { tasksOpen.has(id) ? tasksOpen.delete(id) : tasksOpen.add(id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(id))); };
+  el.onclick = flip; el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
+}
+function armTasks() { if (wide) $('taskList').querySelectorAll('.task[data-id]').forEach(armTask); }
+if (window.ResizeObserver) new ResizeObserver(() => armTasks()).observe($('taskList'));
+else addEventListener('resize', armTasks);
 const phone = { tasks: false, sit: false };  // スマホの幅での開閉（PC の幅から戻ったとき、この状態に戻す）
 let wide = false;  // PC の形（横幅 1100px 以上）
 function showTasks(open) { phone.tasks = open; if (!wide) runTasks(open); }

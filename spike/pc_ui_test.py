@@ -318,7 +318,7 @@ def run_design(page, who):
     s.TASKS.clear()
     short = "更新内容と影響範囲を確認してからレビューの結果を報告してください。"  # 文は短いが、種別と時刻が付くと 2 行からはみ出す
     for i, (st, text, age, kind) in enumerate([("blocked", "承認待ちの指示。" * 12, 5, "send"), ("watching", "短い指示", 10, "send"), ("done", "終わった指示。" * 12, 60, "send"),
-                                               ("done", short, 70, "answer"), ("lost", "切れた指示", 90, "send")]):
+                                               ("done", short, 70, "answer"), ("done", "漢" * 25, 80, "answer"), ("lost", "切れた指示", 90, "send")]):
         s.TASKS[f"d{i}"] = {"id": f"d{i}", "kind": kind, "pane": "w1:p1", "project": "blog", "title": "記事", "text": text,
                             "started": now - age * 60, "updated": now - age * 60, "status": st, "note": ""}
     s.hermes_log("ai", "【全体】本文の一行目\n【次】二行目\nふつうの行【途中】")
@@ -327,7 +327,7 @@ def run_design(page, who):
     groups = page.eval_on_selector_all("#taskList .tgh, #taskList .tgs", "els => els.map(e => e.textContent)")
     lanes = page.eval_on_selector_all("#taskList .task", "els => els.map(e => [e.dataset.lane || '', e.classList.contains('ended')])")
     check(f"{who} 頼んだ件は「動いている」「終わった」に分け、状態の色の帯を付ける", (groups, lanes),
-          (["頼んだ件5 件", "動いている　2", "終わった（3日で一覧から消えます）　3"], [["wait", False], ["run", False], ["done", True], ["done", True], ["bad", True]]))
+          (["頼んだ件6 件", "動いている　2", "終わった（3日で一覧から消えます）　4"], [["wait", False], ["run", False], ["done", True], ["done", True], ["done", True], ["bad", True]]))
     first = page.locator("#taskList .task").nth(0)
     h2 = lambda: first.locator(".what").evaluate("e => [e.getBoundingClientRect().height, parseFloat(getComputedStyle(e).lineHeight)]")
     hh, lh = h2()
@@ -345,7 +345,7 @@ def run_design(page, who):
     for width in (1400, 1100):  # 文は短くても、2 行からはみ出す件は開ける（列の幅が狭いときも）
         page.set_viewport_size({"width": width, "height": 900})
         page.evaluate("loadTasks()")
-        able = wait(lambda: page.evaluate("document.querySelectorAll('#taskList .task').length === 5 && document.querySelectorAll('#taskList .task')[3].getAttribute('role') === 'button'"), 4)
+        able = wait(lambda: page.evaluate("document.querySelectorAll('#taskList .task').length === 6 && document.querySelectorAll('#taskList .task')[3].getAttribute('role') === 'button'"), 4)
         nth = page.locator("#taskList .task").nth(3)
         cut = nth.locator(".what").evaluate("e => e.scrollHeight > e.clientHeight + 2")
         nth.click()
@@ -353,7 +353,24 @@ def run_design(page, who):
         check(f"{who} {width}px: 文は短くても 2 行からはみ出す件は、押すと全文が読める", (able, cut, whole), (True, True, True))
         if whole:
             nth.click()
+    # 幅を変えた直後（取り直しを挟まない）。広い幅で 2 行に収まっていた件が、狭めて切れたら、すぐ押して開ける。広げて収まれば押せるものから外す
+    fit = lambda: page.locator("#taskList .task").nth(4).locator(".what").evaluate("e => e.scrollHeight <= e.clientHeight + 2")
+    role = lambda: page.locator("#taskList .task").nth(4).get_attribute("role")
+    page.set_viewport_size({"width": 1920, "height": 900})
+    page.evaluate("loadTasks()")
+    wide_ok = wait(lambda: page.evaluate("document.querySelectorAll('#taskList .task').length === 6") and fit() and role() is None, 4)
+    page.evaluate("clearInterval(tasksTimer)")  # 10 秒ごとの取り直しを止め、取り直しで直ったのではないことを見る
+    page.set_viewport_size({"width": 1100, "height": 900})
+    narrow_ok = wait(lambda: not fit() and role() == "button", 4)
+    if narrow_ok:
+        page.locator("#taskList .task").nth(4).click()
+    opened = fit() and page.locator("#taskList .task").nth(4).get_attribute("aria-expanded") == "true"
+    check(f"{who} 幅を変えた直後: 1920px で収まっていた件を取り直さずに 1100px へ狭めると、すぐ押して全文を開ける", (wide_ok, narrow_ok, opened), (True, True, True))
+    page.locator("#taskList .task").nth(4).click()
+    page.set_viewport_size({"width": 1920, "height": 900})
+    check(f"{who} 幅を戻して収まれば、押せるものから外す", wait(lambda: fit() and role() is None, 4), True)
     page.set_viewport_size({"width": 1400, "height": 900})
+    page.evaluate("runTasks(true)")
 
     wait(lambda: page.locator("#log .msg.ai .lead").count() > 0)
     leads = page.eval_on_selector_all("#log .msg.ai .lead", "els => els.map(e => [e.textContent, getComputedStyle(e).fontWeight])")
