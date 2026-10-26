@@ -316,8 +316,10 @@ def run_design(page, who):
     (MEM / "USER.md").write_text(s.hermes_memory.DELIM.join(["利用者の名前は山田", LONG]))
     now = time.time()
     s.TASKS.clear()
-    for i, (st, text, age) in enumerate([("blocked", "承認待ちの指示。" * 12, 5), ("watching", "短い指示", 10), ("done", "終わった指示。" * 12, 60), ("lost", "切れた指示", 90)]):
-        s.TASKS[f"d{i}"] = {"id": f"d{i}", "kind": "send", "pane": "w1:p1", "project": "blog", "title": "記事", "text": text,
+    short = "更新内容と影響範囲を確認してからレビューの結果を報告してください。"  # 文は短いが、種別と時刻が付くと 2 行からはみ出す
+    for i, (st, text, age, kind) in enumerate([("blocked", "承認待ちの指示。" * 12, 5, "send"), ("watching", "短い指示", 10, "send"), ("done", "終わった指示。" * 12, 60, "send"),
+                                               ("done", short, 70, "answer"), ("lost", "切れた指示", 90, "send")]):
+        s.TASKS[f"d{i}"] = {"id": f"d{i}", "kind": kind, "pane": "w1:p1", "project": "blog", "title": "記事", "text": text,
                             "started": now - age * 60, "updated": now - age * 60, "status": st, "note": ""}
     s.hermes_log("ai", "【全体】本文の一行目\n【次】二行目\nふつうの行【途中】")
     open_page(page, 1400)
@@ -325,7 +327,7 @@ def run_design(page, who):
     groups = page.eval_on_selector_all("#taskList .tgh, #taskList .tgs", "els => els.map(e => e.textContent)")
     lanes = page.eval_on_selector_all("#taskList .task", "els => els.map(e => [e.dataset.lane || '', e.classList.contains('ended')])")
     check(f"{who} 頼んだ件は「動いている」「終わった」に分け、状態の色の帯を付ける", (groups, lanes),
-          (["頼んだ件4 件", "動いている　2", "終わった（3日で一覧から消えます）　2"], [["wait", False], ["run", False], ["done", True], ["bad", True]]))
+          (["頼んだ件5 件", "動いている　2", "終わった（3日で一覧から消えます）　3"], [["wait", False], ["run", False], ["done", True], ["done", True], ["bad", True]]))
     first = page.locator("#taskList .task").nth(0)
     h2 = lambda: first.locator(".what").evaluate("e => [e.getBoundingClientRect().height, parseFloat(getComputedStyle(e).lineHeight)]")
     hh, lh = h2()
@@ -339,7 +341,19 @@ def run_design(page, who):
     page.locator("#taskList .task").nth(0).focus()
     page.keyboard.press("Enter")
     check(f"{who} キーの Enter でも閉じられる", page.locator("#taskList .task").nth(0).get_attribute("aria-expanded"), "false")
-    check(f"{who} 短い指示は押して開くものにしない", page.locator("#taskList .task").nth(1).get_attribute("role"), None)
+    check(f"{who} 2 行に収まる指示は押して開くものにしない", page.locator("#taskList .task").nth(1).get_attribute("role"), None)
+    for width in (1400, 1100):  # 文は短くても、2 行からはみ出す件は開ける（列の幅が狭いときも）
+        page.set_viewport_size({"width": width, "height": 900})
+        page.evaluate("loadTasks()")
+        able = wait(lambda: page.evaluate("document.querySelectorAll('#taskList .task').length === 5 && document.querySelectorAll('#taskList .task')[3].getAttribute('role') === 'button'"), 4)
+        nth = page.locator("#taskList .task").nth(3)
+        cut = nth.locator(".what").evaluate("e => e.scrollHeight > e.clientHeight + 2")
+        nth.click()
+        whole = nth.locator(".what").evaluate("e => e.scrollHeight <= e.clientHeight + 2 && e.textContent.includes('報告してください。')")
+        check(f"{who} {width}px: 文は短くても 2 行からはみ出す件は、押すと全文が読める", (able, cut, whole), (True, True, True))
+        if whole:
+            nth.click()
+    page.set_viewport_size({"width": 1400, "height": 900})
 
     wait(lambda: page.locator("#log .msg.ai .lead").count() > 0)
     leads = page.eval_on_selector_all("#log .msg.ai .lead", "els => els.map(e => [e.textContent, getComputedStyle(e).fontWeight])")

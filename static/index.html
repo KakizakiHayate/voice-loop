@@ -636,12 +636,15 @@ function drawTasksWide(list, rows) {
       const nm = node('div', 'nm'); nm.append(node('span', 'pj', t.project), node('span', 'tt', '｜' + t.title));
       el.append(tl, nm, node('div', 'what', `${TASK_KIND[t.kind] || t.kind}${t.text ? '：' + t.text : ''}（${hm(t.age_minutes)}）`));
       if (t.note) el.appendChild(node('div', 'note', t.note));
-      if ((t.text || '').length > 40) {  // 2 行に収まらない文だけ、押して開けるように
+      list.appendChild(el);
+      // 2 行からはみ出す件（と、開いている件）だけ押して開けるようにする。はみ出すかは文の長さでなく、描いたあとに測る（種別・時刻・列の幅で変わる）
+      requestAnimationFrame(() => {
+        const w = el.querySelector('.what');
+        if (!tasksOpen.has(t.id) && w.scrollHeight <= w.clientHeight + 2) return;
         el.tabIndex = 0; el.setAttribute('role', 'button'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id)));
         const flip = () => { tasksOpen.has(t.id) ? tasksOpen.delete(t.id) : tasksOpen.add(t.id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(t.id))); };
         el.onclick = flip; el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
-      }
-      list.appendChild(el);
+      });
     }
   }
 }
