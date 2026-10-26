@@ -2952,6 +2952,7 @@ HSK_DIFFS: dict[str, str] = {}  # 指紋 → 差分（見たときの、対象�
 HSK_LOCK = asyncio.Lock()  # 採る・捨てるは一度にひとつ
 _hsk_lock = threading.Lock()  # 状態のファイルを書き換えるのは一度にひとつ
 HSK_NOTE = {
+    "applying": "当てている途中です（台本の終わりを確かめるまで、採る・捨てるは断ります）",
     "applied": "当てました。承認待ちの記録を消せなかったので残っています（捨てるで消せます）",
     "unknown": "当たったか分かりません。手順のファイルか Hermes の対話画面で確かめてください。この書き足しはもう採れません（捨てるはできます）",
 }
@@ -3053,7 +3054,8 @@ def _hsk_view() -> dict:
         note = HSK_NOTE.get(state, "") + (f"（{st['note']}）" if state and st.get("note") else "")
         items.append({**{k: r[k] for k in ("id", "v", "at", "origin", "summary")}, "unsupported": r["why"], "state": state, "note": note,
                       "can_apply": not (r["why"] or state or problem)})
-    return {"on": True, "problem": problem, "items": items, "unreadable": got["unreadable"], "verify": bool(d and d["verify"])}
+    # verify: 前の処理の終わりを確かめるまで断っている（採る・捨てるの最中は、印があっても処理中なので出さない）
+    return {"on": True, "problem": problem, "items": items, "unreadable": got["unreadable"], "verify": bool(d and d["verify"]) and not HSK_LOCK.locked()}
 
 
 def _hsk_args(body: dict) -> tuple[str, str] | None:
@@ -3064,13 +3066,14 @@ def _hsk_args(body: dict) -> tuple[str, str] | None:
 
 
 def _hsk_settled() -> str:
-    """前の処理（時間切れ・本体の停止）が終わったと確かめられているか。確かめられたら ""。
-    時間だけでは解かない。次の要求のたびに、コンテナの中に台本がまだ動いていないかを確かめ直す。"""
+    """前の処理が終わったと確かめられているか。確かめられたら ""。採る・捨てるの鍵の中で呼ぶ（自分の処理は動いていない）。
+    「終わり未確認」の印（台本を動かす前に書き、戻ってきたら外す）か、「当てている途中」の id が残っていれば、
+    コンテナの中に台本がまだ動いていないかを確かめる。時間だけでは解かない。いないと確かめたら、当てている途中の id は分からないにする。"""
     with _hsk_lock:
         d = hsk_state()
     if d is None:
         return f"状態のファイル（{HSK_FILE}）を読めません"
-    if not d["verify"]:
+    if not d["verify"] and not any(v["state"] == "applying" for v in d["items"].values()):
         return ""
     running = hermes_skills.still_running(HERMES_CONTAINER)
     if running is not False:
@@ -3079,14 +3082,34 @@ def _hsk_settled() -> str:
         d = hsk_state()
         if d is None:
             return f"状態のファイル（{HSK_FILE}）を読めません"
+        stuck = [k for k, v in d["items"].items() if v["state"] == "applying"]
+        for k in stuck:
+            d["items"][k].update(state="unknown", at=time.time(), note="当てている途中で止まり、結果を記録できませんでした")
         d["verify"] = False
         try:
             write_json(HSK_FILE, d)
         except OSError:
             traceback.print_exc()
             return "状態を書けません"
+    for k in stuck:
+        hsk_log(id=k, act="approve", result="unknown", why="当てている途中で止まり、結果を記録できませんでした")
     hlog("Hermes の書き足し: 前の処理が終わったのを確かめました", flush=True)
     return ""
+
+
+def _hsk_mark_running() -> bool:
+    """台本を動かす前に「終わり未確認」の印を書く（戻ってきたら外す。外せなければ、次の要求で終わりを確かめる）。書けたら True。"""
+    with _hsk_lock:
+        d = hsk_state()
+        if d is None:
+            return False
+        d["verify"] = True
+        try:
+            write_json(HSK_FILE, d)
+        except OSError:
+            traceback.print_exc()
+            return False
+    return True
 
 
 def _hsk_begin(pid: str, v: str, rec: dict, raw: bytes) -> str:
@@ -3102,6 +3125,7 @@ def _hsk_begin(pid: str, v: str, rec: dict, raw: bytes) -> str:
             _hsk_archive(pid, {"id": pid, "v": v, "summary": rec["summary"], "at": time.time(), "result": "applying",
                                "record": raw.decode("utf-8", "replace")})
             d["items"][pid] = {"state": "applying", "at": time.time(), "v": v, "summary": rec["summary"][:120], "note": ""}
+            d["verify"] = True  # 台本が戻ってきたら外す（_hsk_finish）
             write_json(HSK_FILE, d)
         except OSError:
             traceback.print_exc()
@@ -3124,11 +3148,10 @@ def _hsk_finish(pid: str, v: str, rec: dict, raw: bytes, out: dict) -> dict:
             else:
                 d["items"][pid] = {"state": state, "at": time.time(), "v": v, "summary": rec["summary"][:120],
                                    "note": "" if state == "applied" else why[:200], "discarded": out.get("discarded") is True}
-            if res == "timeout":
-                d["verify"] = True
+            d["verify"] = res == "timeout"  # 時間切れなら、台本がまだ動いているかもしれない
             try:
                 write_json(HSK_FILE, d)
-            except OSError:
+            except OSError:  # 「当てている途中」と印が残る。次の要求で終わりを確かめ、分からないにする
                 traceback.print_exc()
     try:
         _hsk_archive(pid, None if state is None else {"id": pid, "v": v, "summary": rec["summary"], "at": time.time(), "result": res,
@@ -3220,18 +3243,19 @@ async def api_hermes_skill_reject(body: dict):
         why = await asyncio.to_thread(_hsk_settled)
         if why:
             return JSONResponse({"ok": False, "reason": "busy", "why": why})
+        if not await asyncio.to_thread(_hsk_mark_running):
+            return JSONResponse({"ok": False, "reason": "state"})
         out = await asyncio.to_thread(hermes_skills.run_script, HERMES_CONTAINER, "reject", pid, raw)
         res, why = out.get("result"), str(out.get("why") or "")
         summary = hermes_skills.parse_record(raw, pid)["summary"][:120]
         with _hsk_lock:
             d = hsk_state()
-            if d is not None and res in ("rejected", "timeout"):
+            if d is not None:
                 st = d["items"].get(pid)
-                if res == "timeout":
-                    d["verify"] = True
-                elif st and st["state"] in HSK_BLOCK:
+                d["verify"] = res == "timeout"  # 時間切れなら、台本がまだ動いているかもしれない
+                if res == "rejected" and st and st["state"] in HSK_BLOCK:
                     st["dropped"] = time.time()
-                else:
+                elif res == "rejected":
                     d["items"][pid] = {"state": "rejected", "at": time.time(), "v": v, "summary": summary, "note": ""}
                 try:
                     write_json(HSK_FILE, d)

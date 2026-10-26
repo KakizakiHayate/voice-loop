@@ -397,6 +397,87 @@ with TestClient(s.app, base_url="http://127.0.0.1:8790") as c:
     check("本体の停止で当てている途中だった id は、起動のとき分からないにし、終わりを確かめるまで断る",
           (s.hsk_state()["items"]["aaaaaaaa"]["state"], s.hsk_state()["verify"]), ("unknown", True))
 
+    # 保存の失敗が重なっても、台本の終わりを確かめるまで断る（a2a 1 回目の指摘の再現手順）
+    real_wj = s.write_json
+    FAIL = {"on": False}
+
+    def flaky_wj(path, data):
+        if FAIL["on"] and Path(path) == s.HSK_FILE:
+            raise OSError(28, "No space left on device")
+        return real_wj(path, data)
+
+    def then_fail(result):
+        def f():
+            FAIL["on"] = True
+            return dict(result)
+        return f
+
+    PGREPS = []
+    s.write_json = flaky_wj
+    s.hermes_skills.still_running = lambda container: (PGREPS.append(container), RUNNING["v"])[1]
+
+    reset()
+    record("aaaaaaaa", PATCH)
+    va = view()["items"][0]["v"]
+    post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
+    PGREPS.clear()
+    record("bbbbbbbb", PATCH)
+    vb = {i["id"]: i["v"] for i in view()["items"]}["bbbbbbbb"]
+    post("/api/hermes/skills/reject", id="bbbbbbbb", v=vb)
+    check("ふつうに当て・捨てたあとは印が残らない（次の操作で終わりの確かめを呼ばない）", (s.hsk_state()["verify"], PGREPS), (False, []))
+
+    reset()
+    record("aaaaaaaa", PATCH)
+    va = view()["items"][0]["v"]
+    OUT["approve"] = then_fail({"result": "timeout", "why": "x"})
+    post("/api/hermes/skills/approve", id="aaaaaaaa", v=va)
+    FAIL["on"] = False
+    st = s.hsk_state()
+    check("時間切れのあと保存に失敗しても、当てている途中と終わり未確認の印は残る（当てる前に書いてある）",
+          (st["items"]["aaaaaaaa"]["state"], st["verify"]), ("applying", True))
+    PGREPS.clear()
+    RUNNING["v"] = True
+    r = post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)
+    check("…台本がまだ動いている間は、捨てるも断る（終わりを確かめに行く）", (r.get("reason"), len(PGREPS), modes("reject")), ("busy", 1, []))
+    RUNNING["v"] = False
+    r = post("/api/hermes/skills/reject", id="aaaaaaaa", v=va)
+    check("…いないと確かめたら、当てている途中は分からないにして、捨てる（分からない印は残す）",
+          (r.get("ok"), s.hsk_state()["items"]["aaaaaaaa"]["state"], s.hsk_state()["verify"]), (True, "unknown", False))
+
+    reset()
+    record("aaaaaaaa", PATCH)
+    record("bbbbbbbb", PATCH)
+    vs = {i["id"]: i["v"] for i in view()["items"]}
+    OUT["reject"] = then_fail({"result": "timeout", "why": "x"})
+    post("/api/hermes/skills/reject", id="aaaaaaaa", v=vs["aaaaaaaa"])
+    FAIL["on"] = False
+    check("捨てるの時間切れのあと保存に失敗しても、終わり未確認の印は残る（動かす前に書いてある）", s.hsk_state()["verify"], True)
+    PGREPS.clear()
+    RUNNING["v"] = True
+    r = post("/api/hermes/skills/approve", id="bbbbbbbb", v=vs["bbbbbbbb"])
+    check("…台本がまだ動いている間は、ほかの書き足しも採らない", (r.get("reason"), len(PGREPS), modes("approve")), ("busy", 1, []))
+    RUNNING["v"] = False
+    check("…いないと確かめたら採る", post("/api/hermes/skills/approve", id="bbbbbbbb", v=vs["bbbbbbbb"]).get("ok"), True)
+
+    reset()
+    real_wj(s.HSK_FILE, {"items": {"aaaaaaaa": {"state": "applying", "at": time.time(), "summary": "x"}}, "told": {}})
+    FAIL["on"] = True
+    s._recover_hermes_skills()
+    FAIL["on"] = False
+    record("bbbbbbbb", PATCH)
+    vb = view()["items"][0]["v"]
+    PGREPS.clear()
+    RUNNING["v"] = True
+    r = post("/api/hermes/skills/approve", id="bbbbbbbb", v=vb)
+    check("起動時の回復の保存に失敗しても（当てている途中が残り、印が無い）、終わりを確かめるまで採らない",
+          (r.get("reason"), len(PGREPS), modes("approve")), ("busy", 1, []))
+    RUNNING["v"] = False
+    r = post("/api/hermes/skills/approve", id="bbbbbbbb", v=vb)
+    check("…いないと確かめたら、残っていた当てている途中は分からないにして、次を採る",
+          (r.get("ok"), s.hsk_state()["items"]["aaaaaaaa"]["state"]), (True, "unknown"))
+    s.write_json = real_wj
+    s.hermes_skills.still_running = lambda container: RUNNING["v"]
+
     reset()
     dock = {"Host": "host.docker.internal:8790", "X-VL-Key": "k1"}
     record("aaaaaaaa", PATCH)
