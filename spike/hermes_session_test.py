@@ -75,16 +75,57 @@ s.HERMES_SESSION_FILE.rmdir()
 restart()
 hour = s.HERMES_RESET_HOUR
 s.HERMES_RESET_HOUR = None
-check("日ごとに変えない設定（VL_HERMES_RESET_HOUR=off）で状態がまだ無ければ、元の名前のまま（前の版から続ける）", name("2026-10-26 12:00"), "hub")
-e1 = s.hermes_session_new(at("2026-10-26 12:00"))
+offshape = lambda n: bool(re.fullmatch("hub-[0-9a-f]{6}", n))
+o1 = name("2026-10-26 12:00")
+check("日ごとに変えない設定（off）でも、名前は 元-印（元の名前だけの会話は使わない）", offshape(o1), True)
+o2 = s.hermes_session_new(at("2026-10-26 12:00"))
 restart()
-check("off でも新しくすると印が付き、日をまたいでも、起動し直しても続く", (bool(re.fullmatch("hub-[0-9a-f]{6}", e1)), name("2026-10-30 12:00")), (True, e1))
+check("off で新しくすると新しい印になり、日をまたいでも、起動し直しても続く", (offshape(o2), o2 != o1, name("2026-10-30 12:00")), (True, True, o2))
+s.HERMES_SESSION_FILE.unlink()
+restart()
+o3 = name("2026-10-30 12:00")
+check("off で新しくしたあと状態が消えて起動し直しても、捨てた会話（前の名前）へ戻らない", (offshape(o3), o3 in (o1, o2)), (True, False))
 s.HERMES_SESSION_FILE.write_text("壊れた")
 restart()
-check("off で状態が壊れていたら、元の名前（捨てた会話）へ戻らず新しい会話", name("2026-10-30 12:00") in ("hub", e1), False)
+check("off で状態が壊れていても、前の名前へ戻らない", name("2026-10-30 12:00") in (o1, o2, o3), False)
 s.HERMES_SESSION_FILE.unlink()
 restart()
 s.HERMES_RESET_HOUR = hour
+
+# 一覧の読み出し（別のスレッド）が古い印を読んだところで止まり、そのあいだに「新しくする」が済んでも、古い印で上書きしない
+import threading  # noqa: E402
+
+real_file = s.HERMES_SESSION_FILE
+s.write_json(real_file, {"day": "20261026", "token": "aaaaaa"})
+restart()
+read_done, release = threading.Event(), threading.Event()
+
+
+class SlowPath(type(real_file)):
+    def read_text(self, *a, **k):
+        text = super().read_text(*a, **k)
+        read_done.set()
+        release.wait(5)  # 読み終えたところで止まる
+        return text
+
+
+s.HERMES_SESSION_FILE = SlowPath(str(real_file))
+seen = {}
+reader = threading.Thread(target=lambda: seen.update(old=s.hermes_session(at("2026-10-26 12:00"))))
+reader.start()
+read_done.wait(5)
+resetter = threading.Thread(target=lambda: seen.update(new=s.hermes_session_new(at("2026-10-26 12:00"))))
+resetter.start()
+time.sleep(0.3)
+release.set()
+reader.join(5)
+resetter.join(5)
+s.HERMES_SESSION_FILE = real_file
+check("一覧の読み出しと「新しくする」が重なっても、新しくした印で続ける（古い印で上書きしない）",
+      (seen.get("old"), name("2026-10-26 12:00") == seen.get("new"), json.loads(real_file.read_text())["token"] == seen.get("new", "")[-6:]),
+      ("hub-20261026-aaaaaa", True, True))
+real_file.unlink()
+restart()
 check("話し相手の一覧の Hermes の項目に、会話を新しくする時刻が出る（off なら空）",
       (next(a for a in c.get("/api/agents").json() if a.get("hermes"))["reset_hour"],), (4,))
 

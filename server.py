@@ -660,46 +660,49 @@ def hermes_day(now: datetime | None = None) -> str:
 
 
 _session_mem: dict = {}  # この本体が使っている会話の印 {"day", "token"}。状態を書けないときも、動いている間は同じ名前で続ける
+_session_lock = threading.Lock()  # 印を読む・決める・書く・覚えるを一度にひとつ（一覧の読み出しと「新しくする」が重なっても、古い印で上書きしない）
 _TOKEN = re.compile(r"[0-9a-f]{6}")
 
 
 def _session_token(day: str) -> str:
     """その日の会話の印。会話ごとに新しい乱数の印にして、前に使った名前へは戻らない（Hermes は同じ名前の会話を続けるので、
-    状態が壊れた・消えたときに回数のような数え直せる印だと、捨てた会話に戻ってしまう）。状態が無い・壊れている・別の日なら新しい印を作る。
-    日ごとに変えない設定（day が空）で、状態がまだ無いときだけ、印なし（元の名前のまま。前の版から続ける）。"""
-    if _session_mem.get("day") == day:
-        return _session_mem["token"]
-    try:
-        d = json.loads(HERMES_SESSION_FILE.read_text())
-        missing = False
-    except FileNotFoundError:
-        d, missing = None, True
-    except (OSError, ValueError, RecursionError):
-        d, missing = None, False
-    tok = d.get("token") if isinstance(d, dict) and d.get("day") == day else None
-    if not (isinstance(tok, str) and (_TOKEN.fullmatch(tok) or (tok == "" and not day))):
-        tok = "" if (not day and missing) else os.urandom(3).hex()
+    状態が壊れた・消えたときに回数のような数え直せる印や、印なしの名前に戻すと、捨てた会話に戻ってしまう）。
+    状態が無い・壊れている・別の日なら新しい印を作る（日ごとに変えない設定でも同じ）。"""
+    with _session_lock:
+        if _session_mem.get("day") == day:
+            return _session_mem["token"]
         try:
-            write_json(HERMES_SESSION_FILE, {"day": day, "token": tok})
-        except OSError:
-            traceback.print_exc()  # 書けなくても、動いている間はこの印で続ける（再起動したら、また新しい会話になる）
-    _session_mem.update(day=day, token=tok)
-    return tok
+            d = json.loads(HERMES_SESSION_FILE.read_text())
+        except (OSError, ValueError, RecursionError):  # 無い・読めない・壊れている
+            d = None
+        tok = d.get("token") if isinstance(d, dict) and d.get("day") == day else None
+        if not (isinstance(tok, str) and _TOKEN.fullmatch(tok)):
+            tok = os.urandom(3).hex()
+            try:
+                write_json(HERMES_SESSION_FILE, {"day": day, "token": tok})
+            except OSError:
+                traceback.print_exc()  # 書けなくても、動いている間はこの印で続ける（再起動したら、また新しい会話になる）
+        _session_mem.update(day=day, token=tok)
+        return tok
+
+
+def _session_name(day: str, tok: str) -> str:
+    return "-".join([HERMES_SESSION] + ([day] if day else []) + [tok])
 
 
 def hermes_session(now: datetime | None = None) -> str:
-    """いまの Hermes の会話の名前（X-Hermes-Session-Id）。元の名前＋日付＋会話の印。"""
+    """いまの Hermes の会話の名前（X-Hermes-Session-Id）。元の名前＋日付（日ごとに変えるとき）＋会話の印。"""
     day = hermes_day(now)
-    tok = _session_token(day)
-    return "-".join([HERMES_SESSION] + ([day] if day else []) + ([tok] if tok else []))
+    return _session_name(day, _session_token(day))
 
 
 def hermes_session_new(now: datetime | None = None) -> str:
     """画面の「新しくする」。新しい印にして、新しい名前を返す。書けなければ OSError（名前は変わらない）。"""
     day, tok = hermes_day(now), os.urandom(3).hex()
-    write_json(HERMES_SESSION_FILE, {"day": day, "token": tok})
-    _session_mem.update(day=day, token=tok)
-    return hermes_session(now)
+    with _session_lock:
+        write_json(HERMES_SESSION_FILE, {"day": day, "token": tok})
+        _session_mem.update(day=day, token=tok)
+    return _session_name(day, tok)
 
 
 def hermes_agent() -> dict:
