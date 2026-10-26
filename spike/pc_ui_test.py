@@ -366,7 +366,14 @@ def run_design(page, who):
         page.locator("#taskList .task").nth(4).click()
     opened = fit() and page.locator("#taskList .task").nth(4).get_attribute("aria-expanded") == "true"
     check(f"{who} 幅を変えた直後: 1920px で収まっていた件を取り直さずに 1100px へ狭めると、すぐ押して全文を開ける", (wide_ok, narrow_ok, opened), (True, True, True))
+    # 開いたまま広げる → 閉じる。閉じたあと収まっていれば、押せるものから外す（高さが変わらないので、幅の見張りでは拾えない順番）
+    page.set_viewport_size({"width": 1920, "height": 900})
+    still = wait(lambda: role() == "button", 2) and page.locator("#taskList .task").nth(4).get_attribute("aria-expanded") == "true"
     page.locator("#taskList .task").nth(4).click()
+    check(f"{who} 開いたまま広げて閉じると、収まっているので押せるものから外す", (still, wait(lambda: fit() and role() is None and page.evaluate("document.querySelectorAll('#taskList .task')[4].tabIndex") == -1, 4)), (True, True))
+    # 閉じてから広げる順番
+    page.set_viewport_size({"width": 1100, "height": 900})
+    wait(lambda: role() == "button", 4)
     page.set_viewport_size({"width": 1920, "height": 900})
     check(f"{who} 幅を戻して収まれば、押せるものから外す", wait(lambda: fit() and role() is None, 4), True)
     page.set_viewport_size({"width": 1400, "height": 900})

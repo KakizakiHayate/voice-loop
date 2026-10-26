@@ -650,7 +650,10 @@ function armTask(el) {
   }
   if (el.getAttribute('role') === 'button') return;
   el.tabIndex = 0; el.setAttribute('role', 'button'); el.setAttribute('aria-expanded', String(open));
-  const flip = () => { tasksOpen.has(id) ? tasksOpen.delete(id) : tasksOpen.add(id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(id))); };
+  const flip = () => {  // 開け閉めのあとも測り直す（開いたまま広げてから閉じると、もう収まっていることがある。高さが変わらなければ ResizeObserver は呼ばれない）
+    tasksOpen.has(id) ? tasksOpen.delete(id) : tasksOpen.add(id); el.classList.toggle('open'); el.setAttribute('aria-expanded', String(tasksOpen.has(id)));
+    requestAnimationFrame(() => armTask(el));
+  };
   el.onclick = flip; el.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(); } };
 }
 function armTasks() { if (wide) $('taskList').querySelectorAll('.task[data-id]').forEach(armTask); }
